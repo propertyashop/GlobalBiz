@@ -50,6 +50,10 @@ NEW_COLUMNS: list[tuple[str, str]] = [
     ("shopee_category_id",      "INTEGER"),
     ("image_urls",              "JSON"),
     ("condition",               "VARCHAR(20) DEFAULT 'New'"),
+    # ── Shopee多国展開 TWD/MYR/PHP（v3追加）──
+    ("calc_selling_price_twd",  "FLOAT"),
+    ("calc_selling_price_myr",  "FLOAT"),
+    ("calc_selling_price_php",  "FLOAT"),
 ]
 
 

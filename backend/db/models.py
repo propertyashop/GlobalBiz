@@ -85,6 +85,9 @@ class Product(Base):
     target_profit_rate = Column(Float, nullable=True)              # 希望利益率
     calc_selling_price_usd = Column(Float, nullable=True)          # 計算済み推奨価格(USD)
     calc_selling_price_sgd = Column(Float, nullable=True)          # 計算済み推奨価格(SGD)
+    calc_selling_price_twd = Column(Float, nullable=True)          # 計算済み推奨価格(TWD 台湾ドル)
+    calc_selling_price_myr = Column(Float, nullable=True)          # 計算済み推奨価格(MYR マレーシアリンギット)
+    calc_selling_price_php = Column(Float, nullable=True)          # 計算済み推奨価格(PHP フィリピンペソ)
 
     # ===== 在庫情報 =====
     current_stock = Column(Integer, nullable=False, default=0)

@@ -1,5 +1,11 @@
 """
-Shopee Mass Upload CSV エクスポーター
+Shopee Mass Upload CSV エクスポーター（多国対応版）
+
+対応国:
+  - SGP (シンガポール): SGD
+  - TWN (台湾): TWD
+  - MYS (マレーシア): MYR
+  - PHL (フィリピン): PHP
 
 公式テンプレート仕様:
 https://seller.shopee.sg/edu/article/8370
@@ -9,13 +15,55 @@ https://seller.shopee.sg/edu/article/8370
 
 import csv
 import io
+import json as _json
+import zipfile
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
 
-# ── Shopee カテゴリ辞書（主要カテゴリ ID） ──────────────────────────
-# https://open.shopee.com/documents  → Category API で取得可能
-# ここでは SGP/MYS の主要カテゴリを手動で定義
-SHOPEE_CATEGORIES: dict[str, int] = {
+# ── Shopee 対応国設定 ──────────────────────────────────────────────
+SHOPEE_COUNTRY_CONFIG: Dict[str, Dict] = {
+    "SGP": {
+        "name":        "シンガポール",
+        "currency":    "SGD",
+        "symbol":      "S$",
+        "rate_env":    "DEFAULT_EXCHANGE_RATE_SGD",
+        "rate_default": 112.0,
+        "price_field": "calc_selling_price_sgd",
+        "portal_url":  "https://seller.shopee.sg/",
+    },
+    "TWN": {
+        "name":        "台湾",
+        "currency":    "TWD",
+        "symbol":      "NT$",
+        "rate_env":    "DEFAULT_EXCHANGE_RATE_TWD",
+        "rate_default": 4.7,
+        "price_field": "calc_selling_price_twd",
+        "portal_url":  "https://seller.shopee.tw/",
+    },
+    "MYS": {
+        "name":        "マレーシア",
+        "currency":    "MYR",
+        "symbol":      "RM",
+        "rate_env":    "DEFAULT_EXCHANGE_RATE_MYR",
+        "rate_default": 33.0,
+        "price_field": "calc_selling_price_myr",
+        "portal_url":  "https://seller.shopee.com.my/",
+    },
+    "PHL": {
+        "name":        "フィリピン",
+        "currency":    "PHP",
+        "symbol":      "₱",
+        "rate_env":    "DEFAULT_EXCHANGE_RATE_PHP",
+        "rate_default": 2.7,
+        "price_field": "calc_selling_price_php",
+        "portal_url":  "https://seller.shopee.ph/",
+    },
+}
+
+SHOPEE_COUNTRY_NAMES = {k: v["name"] for k, v in SHOPEE_COUNTRY_CONFIG.items()}
+
+# ── Shopee カテゴリ辞書（SGP/MYS 基準 - 共通 ID） ──────────────
+SHOPEE_CATEGORIES: Dict[str, int] = {
     # 家電・電子機器
     "Electronics > Audio":            100644,
     "Electronics > Cameras":          100628,
@@ -67,8 +115,7 @@ SHOPEE_CATEGORIES: dict[str, int] = {
     "Others":                         100599,
 }
 
-# product_category（内部値）→ Shopee カテゴリ ID のデフォルトマッピング
-CATEGORY_DEFAULT_MAP: dict[str, int] = {
+CATEGORY_DEFAULT_MAP: Dict[str, int] = {
     "electronics": 100644,
     "clothing":    100631,
     "accessories": 100590,
@@ -83,8 +130,8 @@ CATEGORY_DEFAULT_MAP: dict[str, int] = {
     "other":       100599,
 }
 
-# Shopee Mass Upload のカラム定義（順序固定）
-SHOPEE_COLUMNS = [
+# Shopee Mass Upload カラム定義（国別推奨価格カラムは動的に付加）
+SHOPEE_COLUMNS_BASE = [
     "Product Name",
     "Category ID",
     "Variation Name 1",
@@ -118,79 +165,78 @@ SHOPEE_COLUMNS = [
     "JAN Code",
     "UPC Code",
     "Cost Price (JPY)",
-    "Recommended Price (SGD)",
 ]
 
 
-def _get_image_urls(product) -> list:
+def _get_image_urls(product) -> List[str]:
     """商品から画像URLリストを取得する（最大9枚）"""
-    urls = []
-    # image_urls フィールド（JSON リスト）
+    urls: List[str] = []
     if product.image_urls:
         if isinstance(product.image_urls, list):
             urls = [u for u in product.image_urls if u]
         elif isinstance(product.image_urls, str):
-            import json
             try:
-                urls = json.loads(product.image_urls) or []
+                urls = _json.loads(product.image_urls) or []
             except Exception:
                 urls = [product.image_urls]
-    # image_url（後方互換）が未追加なら先頭に追加
     if product.image_url and product.image_url not in urls:
         urls.insert(0, product.image_url)
     return urls[:9]
 
 
 def _resolve_shopee_category_id(product) -> int:
-    """商品から Shopee カテゴリ ID を解決する"""
     if product.shopee_category_id:
         return int(product.shopee_category_id)
     if product.product_category:
-        cat_val = product.product_category.value if hasattr(product.product_category, "value") else str(product.product_category)
+        cat_val = (product.product_category.value
+                   if hasattr(product.product_category, "value")
+                   else str(product.product_category))
         return CATEGORY_DEFAULT_MAP.get(cat_val, 100599)
-    return 100599  # Others
+    return 100599
 
 
-def product_to_shopee_row(product, sgd_rate: float = 112.0) -> dict:
+def _get_price_for_country(product, country_code: str, rate: float) -> float:
+    """国別の推奨価格を返す（フォールバック: 仕入れ値 × 1.3 / レート）"""
+    cfg = SHOPEE_COUNTRY_CONFIG.get(country_code, {})
+    field = cfg.get("price_field", "")
+    price = getattr(product, field, None) if field else None
+
+    if not price and product.cost_price:
+        price = round(product.cost_price * 1.3 / rate, 2)
+    return round(float(price or 0), 2)
+
+
+def product_to_shopee_row(
+    product,
+    country_code: str = "SGP",
+    rate: float = 112.0,
+) -> dict:
     """
-    Product モデルを Shopee Mass Upload の1行に変換する。
+    Product → Shopee Mass Upload の1行に変換する。
 
     Args:
-        product: backend.db.models.Product インスタンス
-        sgd_rate: JPY→SGD レート（推奨価格が未設定の場合のフォールバック）
+        product: Product インスタンス
+        country_code: 仕向け国コード（SGP/TWN/MYS/PHL）
+        rate: その国の JPY→現地通貨レート
     """
-    # 商品名（英語優先）
+    cfg = SHOPEE_COUNTRY_CONFIG.get(country_code, SHOPEE_COUNTRY_CONFIG["SGP"])
+    currency = cfg["currency"]
+
     name_en = product.product_name_en or product.name
-
-    # 説明（英語優先）
     desc_en = product.product_description_en or product.description or name_en
-
-    # 価格
-    price_sgd = product.calc_selling_price_sgd or product.selling_price_sgd
-    if not price_sgd and product.cost_price:
-        price_sgd = round(product.cost_price * 1.3 / sgd_rate, 2)
-    price_sgd = round(float(price_sgd or 0), 2)
-
-    # 在庫
-    stock = int(product.current_stock or 0)
-
-    # 重量
+    price   = _get_price_for_country(product, country_code, rate)
+    stock   = int(product.current_stock or 0)
     weight_kg = round((product.weight_g or 500) / 1000, 3)
-
-    # サイズ
-    size_l = product.size_cm_l or 20
-    size_w = product.size_cm_w or 15
-    size_h = product.size_cm_h or 10
-
-    # 画像
-    images = _get_image_urls(product)
+    size_l  = product.size_cm_l or 20
+    size_w  = product.size_cm_w or 15
+    size_h  = product.size_cm_h or 10
+    images  = _get_image_urls(product)
     image_dict = {f"Image {i+1}": (images[i] if i < len(images) else "") for i in range(9)}
-
-    # カテゴリ ID
-    cat_id = _resolve_shopee_category_id(product)
-
-    # コンディション
+    cat_id  = _resolve_shopee_category_id(product)
     condition = getattr(product, "condition", "New") or "New"
+    source  = str(product.source_site.value
+                  if hasattr(product.source_site, "value")
+                  else product.source_site)
 
     row = {
         "Product Name":              name_en[:120],
@@ -201,7 +247,7 @@ def product_to_shopee_row(product, sgd_rate: float = 112.0) -> dict:
         "Variation Value 2":         "",
         "Parent SKU":                product.sku,
         "SKU Reference":             product.sku,
-        "Price":                     f"{price_sgd:.2f}",
+        "Price":                     f"{price:.2f}",
         "Stock":                     stock,
         "Weight (kg)":               weight_kg,
         "Package Length (cm)":       int(size_l),
@@ -213,50 +259,125 @@ def product_to_shopee_row(product, sgd_rate: float = 112.0) -> dict:
         "Pre-Order":                 "No",
         "Days to Ship":              3,
         "Shopee Category ID (Internal)": cat_id,
-        "Source Site":               str(product.source_site.value if hasattr(product.source_site, "value") else product.source_site),
+        "Source Site":               source,
         "JAN Code":                  product.jan_code or "",
         "UPC Code":                  product.upc_code or "",
         "Cost Price (JPY)":          int(product.cost_price or 0),
-        "Recommended Price (SGD)":   f"{price_sgd:.2f}",
+        f"Recommended Price ({currency})": f"{price:.2f}",
         **image_dict,
     }
     return row
 
 
+def _build_columns(currency: str) -> List[str]:
+    return SHOPEE_COLUMNS_BASE + [f"Recommended Price ({currency})"]
+
+
 def export_shopee_csv(
     products: list,
-    sgd_rate: float = 112.0,
+    country_code: str = "SGP",
+    rate: float = 112.0,
+    # 後方互換: sgd_rate
+    sgd_rate: Optional[float] = None,
 ) -> bytes:
     """
     商品リストを Shopee Mass Upload CSV に変換してバイト列を返す。
 
+    Args:
+        products: Product リスト
+        country_code: 仕向け国コード（SGP/TWN/MYS/PHL）
+        rate: JPY→現地通貨レート
+        sgd_rate: 後方互換パラメータ（SGP のみ, 廃止予定）
+
     Returns:
-        UTF-8 BOM付き CSV バイト列（Streamlit の download_button に渡せる）
+        UTF-8 BOM付き CSV バイト列
     """
+    # 後方互換
+    if sgd_rate is not None and country_code == "SGP":
+        rate = sgd_rate
+
+    cfg     = SHOPEE_COUNTRY_CONFIG.get(country_code, SHOPEE_COUNTRY_CONFIG["SGP"])
+    columns = _build_columns(cfg["currency"])
+
     output = io.StringIO()
     writer = csv.DictWriter(
         output,
-        fieldnames=SHOPEE_COLUMNS,
+        fieldnames=columns,
         extrasaction="ignore",
         lineterminator="\r\n",
     )
     writer.writeheader()
-
     for product in products:
-        row = product_to_shopee_row(product, sgd_rate)
-        writer.writerow(row)
+        writer.writerow(product_to_shopee_row(product, country_code, rate))
 
-    # UTF-8 BOM 付きで返す（Excel/Shopeeの文字化け防止）
     return ("\ufeff" + output.getvalue()).encode("utf-8")
 
 
-def get_shopee_category_options() -> dict[str, int]:
+def export_shopee_csv_all_countries(
+    products: list,
+    rates: Optional[Dict[str, float]] = None,
+) -> Dict[str, bytes]:
+    """
+    全 Shopee 対応国（SGP/TWN/MYS/PHL）分の CSV をまとめて返す。
+
+    Args:
+        products: Product リスト
+        rates: {country_code: rate} 辞書（None の場合はデフォルト値を使用）
+
+    Returns:
+        {country_code: CSV bytes} 辞書
+    """
+    if rates is None:
+        rates = {}
+
+    result: Dict[str, bytes] = {}
+    for code, cfg in SHOPEE_COUNTRY_CONFIG.items():
+        r = rates.get(code, cfg["rate_default"])
+        result[code] = export_shopee_csv(products, country_code=code, rate=r)
+    return result
+
+
+def export_shopee_zip(
+    products: list,
+    country_codes: Optional[List[str]] = None,
+    rates: Optional[Dict[str, float]] = None,
+) -> bytes:
+    """
+    指定国分の Shopee CSV を ZIP にまとめて返す。
+
+    Args:
+        products: Product リスト
+        country_codes: 出力する国コードリスト（None = 全4国）
+        rates: {country_code: rate}（None = デフォルト）
+
+    Returns:
+        ZIP バイト列（Streamlit の download_button に渡せる）
+    """
+    if country_codes is None:
+        country_codes = list(SHOPEE_COUNTRY_CONFIG.keys())
+    if rates is None:
+        rates = {}
+
+    date_str = datetime.now().strftime("%Y%m%d")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for code in country_codes:
+            if code not in SHOPEE_COUNTRY_CONFIG:
+                continue
+            cfg = SHOPEE_COUNTRY_CONFIG[code]
+            r   = rates.get(code, cfg["rate_default"])
+            csv_bytes = export_shopee_csv(products, country_code=code, rate=r)
+            fname = f"shopee_{code}_{date_str}.csv"
+            zf.writestr(fname, csv_bytes)
+    return buf.getvalue()
+
+
+def get_shopee_category_options() -> Dict[str, int]:
     """フォーム用カテゴリ選択肢を返す"""
     return SHOPEE_CATEGORIES
 
 
 if __name__ == "__main__":
-    # 動作テスト（DBから商品を取得して出力）
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -266,11 +387,15 @@ if __name__ == "__main__":
     with get_session() as s:
         products = s.query(Product).all()
 
-    csv_bytes = export_shopee_csv(products)
-    filename = f"shopee_products_{datetime.now().strftime('%Y%m%d')}.csv"
-    Path(filename).write_bytes(csv_bytes)
-    print(f"出力: {filename}（{len(products)}件, {len(csv_bytes):,} bytes）")
-    # 先頭2行を確認
-    lines = csv_bytes.decode("utf-8-sig").split("\r\n")
-    for i, line in enumerate(lines[:3]):
-        print(f"  行{i}: {line[:100]}...")
+    print(f"商品数: {len(products)} 件")
+    for code in SHOPEE_COUNTRY_CONFIG:
+        cfg   = SHOPEE_COUNTRY_CONFIG[code]
+        data  = export_shopee_csv(products, country_code=code, rate=cfg["rate_default"])
+        fname = f"shopee_{code}_{datetime.now().strftime('%Y%m%d')}.csv"
+        Path(fname).write_bytes(data)
+        print(f"  {cfg['name']} ({cfg['currency']}): {fname} — {len(data):,} bytes")
+
+    zip_data = export_shopee_zip(products)
+    zip_name = f"shopee_all_{datetime.now().strftime('%Y%m%d')}.zip"
+    Path(zip_name).write_bytes(zip_data)
+    print(f"\nZIP: {zip_name} — {len(zip_data):,} bytes")
