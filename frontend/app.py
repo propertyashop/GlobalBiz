@@ -832,6 +832,17 @@ elif page == "🚀 出品管理":
     with tab1:
         st.subheader("eBay 出品状況")
 
+        import importlib
+        import backend.marketplaces.ebay as _ebay_mod
+        importlib.reload(_ebay_mod)
+        _ebay = _ebay_mod.EbayClient()
+
+        # API設定チェック
+        if not _ebay.is_configured():
+            st.warning("⚠️ eBay APIキーが未設定です。「⚙️ 設定」→「🟦 eBay API」で入力してください。")
+        else:
+            st.success("✅ eBay API設定済み")
+
         with get_session() as s:
             ebay_listed   = s.query(Product).filter(Product.ebay_listing_id.isnot(None)).all()
             ebay_pending  = s.query(Product).filter(
@@ -839,16 +850,85 @@ elif page == "🚀 出品管理":
                 Product.ebay_listing_id.is_(None),
             ).all()
 
+        _usd_rate = float(get_env("DEFAULT_EXCHANGE_RATE_USD", "150"))
         col_l, col_r = st.columns(2)
-        col_l.metric("出品中", len(ebay_listed))
-        col_r.metric("未出品（対象）", len(ebay_pending))
+        col_l.metric("DB内: 出品済", len(ebay_listed))
+        col_r.metric("未出品（eBay対象）", len(ebay_pending))
 
+        # ── eBay から実際の出品リストを取得 ──
+        st.divider()
+        if st.button("🔄 eBay出品リストを取得", key="fetch_ebay_list"):
+            if not _ebay.is_configured():
+                st.error("APIキーを設定してください")
+            else:
+                with st.spinner("eBay APIから出品中リストを取得中..."):
+                    live_listings, err = _ebay.get_active_listings()
+                if err:
+                    st.error(f"取得失敗: {err}")
+                else:
+                    st.session_state["ebay_live_listings"] = live_listings
+                    st.success(f"eBay出品中: {len(live_listings)} 件を取得しました")
+
+        if st.session_state.get("ebay_live_listings"):
+            live = st.session_state["ebay_live_listings"]
+            st.markdown(f"#### 📋 eBay出品中 ({len(live)}件) — リアルタイム")
+            live_rows = []
+            for item in live:
+                live_rows.append({
+                    "Item ID": item.item_id,
+                    "タイトル": item.title[:45] + "…" if len(item.title) > 45 else item.title,
+                    "価格(USD)": f"${item.price_usd:,.2f}",
+                    "在庫": item.quantity,
+                    "売済": item.quantity_sold,
+                    "出品終了": item.end_time or "GTC",
+                    "URL": item.url,
+                })
+            live_df = pd.DataFrame(live_rows)
+            st.dataframe(live_df, use_container_width=True, hide_index=True)
+
+            # 個別操作
+            with st.expander("⚙️ 個別操作（価格更新・出品停止）"):
+                _op_item_id = st.text_input("操作する Item ID", placeholder="123456789012")
+                _op_cols = st.columns(3)
+                _new_price = _op_cols[0].number_input("新しい価格 (USD)", min_value=0.01, step=0.5, value=10.0)
+                if _op_cols[1].button("💰 価格更新", key="ebay_update_price"):
+                    if _op_item_id:
+                        with st.spinner("更新中..."):
+                            r = _ebay.update_price(_op_item_id, _new_price)
+                        if r.success:
+                            st.success(f"✅ Item {_op_item_id} の価格を ${_new_price:.2f} に更新しました")
+                            # DB更新
+                            with get_session() as s:
+                                p = s.query(Product).filter(Product.ebay_listing_id == _op_item_id).first()
+                                if p:
+                                    p.selling_price_usd = _new_price
+                                    s.commit()
+                        else:
+                            st.error(f"更新失敗: {r.error}")
+                if _op_cols[2].button("🛑 出品停止", key="ebay_end_item"):
+                    if _op_item_id:
+                        with st.spinner("停止処理中..."):
+                            r = _ebay.end_listing(_op_item_id)
+                        if r.success:
+                            st.success(f"✅ Item {_op_item_id} の出品を停止しました")
+                            with get_session() as s:
+                                p = s.query(Product).filter(Product.ebay_listing_id == _op_item_id).first()
+                                if p:
+                                    p.ebay_listing_id = None
+                                    p.status = ProductStatus.DRAFT
+                                    s.commit()
+                        else:
+                            st.error(f"停止失敗: {r.error}")
+
+        # ── DB内の出品済み商品 ──
         if ebay_listed:
-            st.markdown("#### 出品中の商品")
+            st.divider()
+            st.markdown("#### 🗄️ DB内: 出品済み商品")
             rows = []
             for p in ebay_listed:
                 rows.append({
-                    "SKU": p.sku, "商品名": p.name[:40],
+                    "SKU": p.sku,
+                    "商品名": p.name[:40],
                     "listing_id": p.ebay_listing_id,
                     "推奨USD": f"${p.calc_selling_price_usd:,.2f}" if p.calc_selling_price_usd else "—",
                     "在庫": p.current_stock,
@@ -856,23 +936,52 @@ elif page == "🚀 出品管理":
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
+        # ── 未出品商品 → 出品ボタン ──
         if ebay_pending:
-            st.markdown("#### 未出品（eBay対象）商品")
+            st.divider()
+            st.markdown("#### 📤 未出品（eBay対象）商品")
             for p in ebay_pending:
-                ec1, ec2, ec3 = st.columns([3, 1, 1])
-                ec1.write(f"**{p.name[:40]}** ({p.sku})")
-                price_default = p.calc_selling_price_usd or round(p.cost_price / 150 * 1.5, 2)
-                if ec3.button("出品", key=f"ebay_list_{p.id}"):
-                    st.session_state["listing_target"] = (p.id, "ebay")
-                    st.session_state["show_listing_modal"] = True
-                    st.rerun()
+                with st.container(border=True):
+                    ec1, ec2, ec3, ec4 = st.columns([3, 1.5, 1.5, 1])
+                    ec1.markdown(f"**{p.name[:38]}**  \n`{p.sku}`")
+                    _price_default = round(float(p.calc_selling_price_usd or (p.cost_price / _usd_rate * 1.3)), 2)
+                    _price_key = f"pending_price_{p.id}"
+                    if _price_key not in st.session_state:
+                        st.session_state[_price_key] = _price_default
+                    _price_show = ec2.number_input(
+                        "価格(USD)", min_value=0.01, step=0.5,
+                        value=st.session_state[_price_key],
+                        key=_price_key, label_visibility="visible",
+                    )
+                    ec3.metric("在庫", p.current_stock)
+                    if ec4.button("🚀 出品", key=f"ebay_list_{p.id}", type="primary"):
+                        if not _ebay.is_configured():
+                            st.error("APIキーを設定してください")
+                        else:
+                            with st.spinner(f"「{p.name[:20]}」をeBayに出品中..."):
+                                result = _ebay.create_listing(p, _price_show)
+                            if result.success:
+                                with get_session() as s:
+                                    _p = s.query(Product).filter(Product.id == p.id).first()
+                                    _p.ebay_listing_id = result.listing_id
+                                    _p.selling_price_usd = _price_show
+                                    _p.status = ProductStatus.ACTIVE
+                                    s.commit()
+                                st.success(f"✅ 出品完了！ Item ID: `{result.listing_id}`")
+                                if result.url:
+                                    st.markdown(f"🔗 [eBayで確認する]({result.url})")
+                                if result.fees is not None:
+                                    st.caption(f"出品手数料: ${result.fees:.2f} USD")
+                                st.rerun()
+                            else:
+                                st.error(f"出品失敗: {result.error}")
 
-        # API接続テスト
+        # 接続テスト
+        st.divider()
         with st.expander("🔧 eBay API 接続テスト"):
-            if st.button("接続テスト実行", key="ebay_test"):
-                from backend.marketplaces.ebay import get_ebay_client
-                client = get_ebay_client()
-                ok, msg = client.test_connection()
+            if st.button("接続テスト実行", key="ebay_test_mgmt"):
+                with st.spinner("接続テスト中..."):
+                    ok, msg = _ebay.test_connection()
                 if ok:
                     st.success(msg)
                 else:
@@ -1007,41 +1116,108 @@ elif page == "⚙️ 設定":
 
     # ─── eBay API設定 ───
     with tab_ebay:
-        st.subheader("eBay API キー")
-        st.caption("eBay Developer Portal で取得: https://developer.ebay.com")
+        st.subheader("eBay Trading API キー")
+        st.markdown(
+            "取得先: [eBay Developer Portal](https://developer.ebay.com/my/keys)  |  "
+            "トークン: Developer Portal → **Get a User Token**"
+        )
+
+        # 現在の設定状況を表示
+        _ebay_fields = {
+            "EBAY_APP_ID": get_env("EBAY_APP_ID"),
+            "EBAY_DEV_ID": get_env("EBAY_DEV_ID"),
+            "EBAY_CERT_ID": get_env("EBAY_CERT_ID"),
+            "EBAY_USER_TOKEN": get_env("EBAY_USER_TOKEN"),
+        }
+        _all_set = all(_ebay_fields.values())
+        if _all_set:
+            st.success("✅ 全APIキーが設定済みです")
+        else:
+            _missing = [k for k, v in _ebay_fields.items() if not v]
+            st.warning(f"⚠️ 未設定: {', '.join(_missing)}")
 
         with st.form("ebay_form"):
-            e1 = st.text_input("EBAY_APP_ID (Client ID)",   value=get_env("EBAY_APP_ID"),    type="password")
-            e2 = st.text_input("EBAY_CERT_ID (Client Secret)", value=get_env("EBAY_CERT_ID"), type="password")
-            e3 = st.text_input("EBAY_DEV_ID",                value=get_env("EBAY_DEV_ID"),   type="password")
-            e4 = st.text_area("EBAY_TOKEN (User Access Token)", value=get_env("EBAY_TOKEN"), height=80)
-            e5 = st.text_input("EBAY_FULFILLMENT_POLICY_ID", value=get_env("EBAY_FULFILLMENT_POLICY_ID"))
-            e6 = st.text_input("EBAY_PAYMENT_POLICY_ID",     value=get_env("EBAY_PAYMENT_POLICY_ID"))
-            e7 = st.text_input("EBAY_RETURN_POLICY_ID",      value=get_env("EBAY_RETURN_POLICY_ID"))
-            e8 = st.text_input("EBAY_MERCHANT_LOCATION_KEY", value=get_env("EBAY_MERCHANT_LOCATION_KEY"))
-            e_sandbox = st.checkbox("サンドボックスモード", value=get_env("EBAY_SANDBOX","false")=="true")
+            e1 = st.text_input("EBAY_APP_ID",   value=get_env("EBAY_APP_ID"),  type="password")
+            e2 = st.text_input("EBAY_DEV_ID",   value=get_env("EBAY_DEV_ID"),  type="password")
+            e3 = st.text_input("EBAY_CERT_ID",  value=get_env("EBAY_CERT_ID"), type="password")
+            e4 = st.text_area(
+                "EBAY_USER_TOKEN（User Token）",
+                value=get_env("EBAY_USER_TOKEN"),
+                height=100,
+                help="Developer Portal の「Get a User Token」で取得。v^1.1#i^1#... から始まる文字列",
+            )
+            e_site = st.selectbox(
+                "EBAY_SITE_ID（販売市場）",
+                options=["0 (US)", "3 (UK)", "77 (DE)", "15 (AU)", "193 (CH)"],
+                index=["0 (US)", "3 (UK)", "77 (DE)", "15 (AU)", "193 (CH)"].index(
+                    f"{get_env('EBAY_SITE_ID','0')} (US)" if get_env("EBAY_SITE_ID","0") == "0"
+                    else f"{get_env('EBAY_SITE_ID','0')} (UK)" if get_env("EBAY_SITE_ID","0") == "3"
+                    else "0 (US)"
+                ) if get_env("EBAY_SITE_ID","0") in ["0","3"] else 0,
+            )
+            e_sandbox = st.checkbox("🧪 サンドボックスモード", value=get_env("EBAY_SANDBOX","false")=="true")
 
             if st.form_submit_button("💾 eBay設定を保存", type="primary"):
+                site_num = e_site.split(" ")[0]
                 for k, v in [
-                    ("EBAY_APP_ID", e1), ("EBAY_CERT_ID", e2), ("EBAY_DEV_ID", e3),
-                    ("EBAY_TOKEN", e4), ("EBAY_FULFILLMENT_POLICY_ID", e5),
-                    ("EBAY_PAYMENT_POLICY_ID", e6), ("EBAY_RETURN_POLICY_ID", e7),
-                    ("EBAY_MERCHANT_LOCATION_KEY", e8),
+                    ("EBAY_APP_ID", e1), ("EBAY_DEV_ID", e2),
+                    ("EBAY_CERT_ID", e3), ("EBAY_USER_TOKEN", e4),
+                    ("EBAY_SITE_ID", site_num),
                     ("EBAY_SANDBOX", "true" if e_sandbox else "false"),
                 ]:
-                    if v: save_env(k, v)
+                    if v:
+                        save_env(k, v)
                 st.success("✅ eBay設定を保存しました（.env 更新済み）")
                 st.rerun()
 
+        # トークン診断
+        _cur_token = get_env("EBAY_USER_TOKEN")
+        if _cur_token:
+            _tlen = len(_cur_token)
+            if _tlen < 200:
+                st.error(
+                    f"⚠️ **トークンが短すぎます（現在 {_tlen} 文字 / 正常: 350〜500文字）**\n\n"
+                    "チャットへの貼り付け時に途中で切断された可能性があります。\n"
+                    "下記の手順でトークンを再取得・再入力してください。"
+                )
+                with st.expander("📋 eBay User Token の再取得手順", expanded=True):
+                    st.markdown("""
+1. [eBay Developer Portal](https://developer.ebay.com/my/auth/?env=production&index=0) を開く
+2. 上部メニュー **Hi, [name] → User Tokens** をクリック
+3. **Generate a User Token** ボタンをクリック
+4. eBayアカウントでログイン・許可
+5. 表示された **Auth Token** を全文コピー
+   - `v^1.1#i^1#r^1#...`  で始まる **350〜500文字** の文字列
+6. 上の入力欄「EBAY_USER_TOKEN」にペーストして **💾 保存**
+7. 接続テストで確認
+""")
+            elif _tlen < 300:
+                st.warning(f"⚠️ トークン長 {_tlen} 文字（やや短め。接続テストで確認してください）")
+            else:
+                st.info(f"✅ トークン長: {_tlen} 文字（正常範囲）")
+
         st.divider()
-        st.markdown("**接続テスト**")
-        if st.button("🔌 eBay接続テスト"):
-            from backend.marketplaces.ebay import EbayClient
-            import importlib, backend.marketplaces.ebay as ebay_mod
-            importlib.reload(ebay_mod)
-            client = ebay_mod.EbayClient()
-            ok, msg = client.test_connection()
-            st.success(msg) if ok else st.error(msg)
+        st.markdown("**🔌 接続テスト（GetUser）**")
+        st.caption("eBay Trading API の GetUser を呼び出してアカウント情報を確認します")
+        if st.button("eBay API 接続テスト実行", type="primary", key="ebay_conn_test"):
+            with st.spinner("eBay APIに接続中..."):
+                import importlib
+                import backend.marketplaces.ebay as ebay_mod
+                importlib.reload(ebay_mod)
+                client = ebay_mod.EbayClient()
+                ok, msg = client.test_connection()
+            if ok:
+                st.success(msg)
+            else:
+                st.error(msg)
+                if "931" in msg:
+                    st.warning(
+                        "**エラー931: トークン認証失敗**\n\n"
+                        "考えられる原因:\n"
+                        "1. トークンが短すぎる/途中で切れている → 上で確認\n"
+                        "2. トークンの有効期限切れ（18ヶ月） → 再取得が必要\n"
+                        "3. APP_ID/CERT_ID がトークンと一致しない"
+                    )
 
     # ─── Shopee API設定 ───
     with tab_shopee:

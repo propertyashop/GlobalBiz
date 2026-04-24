@@ -1,290 +1,567 @@
 """
-eBay REST API 連携モジュール
-- Sell API (出品・在庫・価格更新)
-- OAuth 2.0 認証
+eBay Trading API 連携モジュール
 
-公式ドキュメント: https://developer.ebay.com/develop/apis/restful-apis/sell-apis
+認証方式: Auth'n'Auth Token（EBAY_USER_TOKEN）
+APIバージョン: 1193
+エンドポイント: https://api.ebay.com/ws/api.dll
+
+主要コール:
+  GetUser           → 接続テスト・ユーザー情報取得
+  AddItem           → 新規出品
+  ReviseItem        → 価格・在庫更新
+  EndItem           → 出品停止
+  GetMyeBaySelling  → 出品中商品一覧
+  GetItem           → 個別商品情報取得
+
+公式ドキュメント:
+  https://developer.ebay.com/DevZone/XML/docs/Reference/eBay/index.html
 """
 
-import hashlib
-import hmac
-import json
 import os
-import time
-from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Any, Optional, Tuple
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
-EBAY_APP_ID    = os.getenv("EBAY_APP_ID", "")
-EBAY_CERT_ID   = os.getenv("EBAY_CERT_ID", "")
-EBAY_DEV_ID    = os.getenv("EBAY_DEV_ID", "")
-EBAY_TOKEN     = os.getenv("EBAY_TOKEN", "")          # User Access Token
-EBAY_SANDBOX   = os.getenv("EBAY_SANDBOX", "false").lower() == "true"
+# ── 認証情報 ──────────────────────────────────────────────────────
+APP_ID     = os.getenv("EBAY_APP_ID", "")
+DEV_ID     = os.getenv("EBAY_DEV_ID", "")
+CERT_ID    = os.getenv("EBAY_CERT_ID", "")
+USER_TOKEN = os.getenv("EBAY_USER_TOKEN", "")
+SITE_ID    = os.getenv("EBAY_SITE_ID", "0")   # 0=US, 3=UK, 77=DE, 15=AU
+SANDBOX    = os.getenv("EBAY_SANDBOX", "false").lower() == "true"
 
-BASE_URL = (
-    "https://api.sandbox.ebay.com"
-    if EBAY_SANDBOX
-    else "https://api.ebay.com"
+TRADING_ENDPOINT = (
+    "https://api.sandbox.ebay.com/ws/api.dll"
+    if SANDBOX
+    else "https://api.ebay.com/ws/api.dll"
 )
+API_VERSION = "1193"
+NS = "urn:ebay:apis:eBLBaseComponents"
 
-# eBay カテゴリーマッピング（商品カテゴリ → eBay CategoryID）
-CATEGORY_MAP: dict[str, str] = {
+# ── カテゴリマッピング（内部カテゴリ → eBay CategoryID） ───────────
+CATEGORY_MAP: Dict[str, str] = {
     "electronics":  "293",     # Consumer Electronics
     "clothing":     "11450",   # Clothing, Shoes & Accessories
     "accessories":  "14223",   # Jewelry & Watches
     "toys":         "220",     # Toys & Hobbies
-    "food":         "14308",   # Food & Beverages
+    "food":         "14308",   # Specialty Food
     "cosmetics":    "26395",   # Health & Beauty
     "health":       "26395",   # Health & Beauty
     "sports":       "888",     # Sporting Goods
     "home":         "11700",   # Home & Garden
     "books":        "267",     # Books
-    "auto":         "6000",    # eBay Motors > Parts & Accessories
+    "auto":         "6000",    # eBay Motors > Parts
     "other":        "99",      # Everything Else
 }
 
-# 配送ポリシー（要事前作成）- .env で上書き可
-EBAY_FULFILLMENT_POLICY_ID = os.getenv("EBAY_FULFILLMENT_POLICY_ID", "")
-EBAY_PAYMENT_POLICY_ID     = os.getenv("EBAY_PAYMENT_POLICY_ID", "")
-EBAY_RETURN_POLICY_ID      = os.getenv("EBAY_RETURN_POLICY_ID", "")
-EBAY_MERCHANT_LOCATION_KEY = os.getenv("EBAY_MERCHANT_LOCATION_KEY", "")
+# ConditionID マッピング
+CONDITION_MAP: Dict[str, str] = {
+    "New":              "1000",
+    "New (Open Box)":   "1500",
+    "Like New":         "3000",
+    "Very Good":        "4000",
+    "Good":             "5000",
+    "Acceptable":       "6000",
+    "For Parts":        "7000",
+}
 
 
+# ── データクラス ──────────────────────────────────────────────────
 @dataclass
 class ListingResult:
     success: bool
-    listing_id: Optional[str]
-    url: Optional[str]
-    error: Optional[str]
-    raw: Optional[dict]
+    listing_id: Optional[str] = None
+    url: Optional[str] = None
+    error: Optional[str] = None
+    fees: Optional[float] = None   # 出品手数料 (USD)
+    raw_xml: Optional[str] = None
 
 
 @dataclass
 class UpdateResult:
     success: bool
-    error: Optional[str]
+    error: Optional[str] = None
+
+
+@dataclass
+class ActiveListing:
+    item_id: str
+    title: str
+    price_usd: float
+    quantity: int
+    quantity_sold: int
+    url: str
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+
+
+# ── XML ヘルパー ──────────────────────────────────────────────────
+def _esc(s: Any) -> str:
+    """XML特殊文字をエスケープ"""
+    return (
+        str(s)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
+
+
+def _creds() -> str:
+    return f"""<RequesterCredentials>
+    <eBayAuthToken>{USER_TOKEN}</eBayAuthToken>
+  </RequesterCredentials>"""
+
+
+def _find(root: ET.Element, path: str) -> Optional[str]:
+    """名前空間付きでテキストを取得"""
+    parts = path.split("/")
+    ns_parts = "/".join(f"{{{NS}}}{p}" for p in parts)
+    el = root.find(ns_parts)
+    return el.text if el is not None else None
+
+
+def _findall(root: ET.Element, path: str) -> List[ET.Element]:
+    parts = path.split("/")
+    ns_parts = "/".join(f"{{{NS}}}{p}" for p in parts)
+    return root.findall(ns_parts)
+
+
+def _get_errors(root: ET.Element) -> str:
+    msgs = []
+    for err in root.findall(f"{{{NS}}}Errors"):
+        code = err.findtext(f"{{{NS}}}ErrorCode") or ""
+        msg  = err.findtext(f"{{{NS}}}LongMessage") or err.findtext(f"{{{NS}}}ShortMessage") or ""
+        msgs.append(f"[{code}] {msg}")
+    return " / ".join(msgs) if msgs else "Unknown error"
 
 
 class EbayClient:
-    """eBay Sell API クライアント"""
+    """eBay Trading API クライアント（Auth'n'Auth Token方式）"""
 
     def __init__(self):
-        self.token = EBAY_TOKEN
-        self.base_url = BASE_URL
-        self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
-        })
+        self.app_id     = APP_ID
+        self.dev_id     = DEV_ID
+        self.cert_id    = CERT_ID
+        self.user_token = USER_TOKEN
+        self.site_id    = SITE_ID
+        self.endpoint   = TRADING_ENDPOINT
 
-    def _request(
-        self,
-        method: str,
-        path: str,
-        json_body: Optional[dict] = None,
-        params: Optional[dict] = None,
-    ) -> Tuple[int, dict]:
-        url = f"{self.base_url}{path}"
-        resp = self.session.request(method, url, json=json_body, params=params, timeout=30)
+    def _headers(self, call_name: str) -> Dict[str, str]:
+        return {
+            "X-EBAY-API-COMPATIBILITY-LEVEL": API_VERSION,
+            "X-EBAY-API-CALL-NAME":           call_name,
+            "X-EBAY-API-SITEID":              self.site_id,
+            "X-EBAY-API-APP-NAME":            self.app_id,
+            "X-EBAY-API-DEV-NAME":            self.dev_id,
+            "X-EBAY-API-CERT-NAME":           self.cert_id,
+            "Content-Type":                   "text/xml;charset=utf-8",
+        }
+
+    def _call(self, call_name: str, xml_body: str) -> ET.Element:
+        """Trading API を呼び出して ElementTree を返す"""
+        resp = requests.post(
+            self.endpoint,
+            data=xml_body.encode("utf-8"),
+            headers=self._headers(call_name),
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return ET.fromstring(resp.content)
+
+    def _ack_ok(self, root: ET.Element) -> bool:
+        ack = _find(root, "Ack")
+        return ack in ("Success", "Warning")
+
+    # ── 接続テスト ────────────────────────────────────────────────
+    def test_connection(self) -> Tuple[bool, str]:
+        """GetUser で接続確認・ユーザーIDを取得"""
+        if not self.is_configured():
+            missing = [k for k, v in [
+                ("EBAY_APP_ID", self.app_id),
+                ("EBAY_DEV_ID", self.dev_id),
+                ("EBAY_CERT_ID", self.cert_id),
+                ("EBAY_USER_TOKEN", self.user_token),
+            ] if not v]
+            return False, f"未設定の環境変数: {', '.join(missing)}"
+
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<GetUserRequest xmlns="{NS}">
+  {_creds()}
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+</GetUserRequest>"""
+
         try:
-            body = resp.json()
-        except Exception:
-            body = {"raw": resp.text}
-        return resp.status_code, body
+            root = self._call("GetUser", xml)
+        except Exception as e:
+            return False, f"通信エラー: {e}"
 
-    # ===== Inventory Item =====
-    def create_or_update_inventory_item(self, sku: str, product: Any) -> UpdateResult:
-        """在庫アイテムを作成/更新する"""
-        # product は backend.db.models.Product インスタンス
-        body = {
-            "availability": {
-                "shipToLocationAvailability": {
-                    "quantity": int(product.current_stock or 0)
-                }
-            },
-            "condition": "NEW",
-            "product": {
-                "title": product.name[:80],
-                "description": product.description or product.name,
-                "aspects": {},
-                "imageUrls": [product.image_url] if product.image_url else [],
-            },
-            "packageWeightAndSize": {},
-        }
-
-        # 重量設定
-        if product.weight_g and product.weight_g > 0:
-            body["packageWeightAndSize"]["weight"] = {
-                "unit": "GRAM",
-                "value": product.weight_g,
-            }
-
-        # JANコード設定
-        if product.jan_code:
-            body["product"]["aspects"]["EAN"] = [product.jan_code]
-        if product.asin:
-            body["product"]["aspects"]["ASIN"] = [product.asin]
-
-        status, resp = self._request(
-            "PUT",
-            f"/sell/inventory/v1/inventory_item/{sku}",
-            json_body=body,
-        )
-        if status in (200, 204):
-            return UpdateResult(success=True, error=None)
-        return UpdateResult(success=False, error=json.dumps(resp.get("errors", resp)))
-
-    # ===== Offer =====
-    def create_offer(self, sku: str, price_usd: float, product: Any) -> Tuple[bool, str, Optional[str]]:
-        """
-        Offer を作成して listing_id を返す。
-        Returns: (success, offer_id_or_error, listing_url)
-        """
-        category_id = CATEGORY_MAP.get(
-            product.product_category.value if product.product_category else "other",
-            "99"
-        )
-        body: dict = {
-            "sku": sku,
-            "marketplaceId": "EBAY_US",
-            "format": "FIXED_PRICE",
-            "availableQuantity": int(product.current_stock or 0),
-            "categoryId": category_id,
-            "listingDescription": product.description or product.name,
-            "listingPolicies": {},
-            "pricingSummary": {
-                "price": {
-                    "currency": "USD",
-                    "value": f"{price_usd:.2f}",
-                }
-            },
-        }
-
-        # ポリシーが設定されている場合のみ追加
-        if EBAY_FULFILLMENT_POLICY_ID:
-            body["listingPolicies"]["fulfillmentPolicyId"] = EBAY_FULFILLMENT_POLICY_ID
-        if EBAY_PAYMENT_POLICY_ID:
-            body["listingPolicies"]["paymentPolicyId"] = EBAY_PAYMENT_POLICY_ID
-        if EBAY_RETURN_POLICY_ID:
-            body["listingPolicies"]["returnPolicyId"] = EBAY_RETURN_POLICY_ID
-        if EBAY_MERCHANT_LOCATION_KEY:
-            body["merchantLocationKey"] = EBAY_MERCHANT_LOCATION_KEY
-
-        status, resp = self._request("POST", "/sell/inventory/v1/offer", json_body=body)
-        if status == 201:
-            offer_id = resp.get("offerId", "")
-            return True, offer_id, None
-        return False, json.dumps(resp.get("errors", resp)), None
-
-    def publish_offer(self, offer_id: str) -> ListingResult:
-        """Offer を公開して listing URL を取得する"""
-        status, resp = self._request(
-            "POST",
-            f"/sell/inventory/v1/offer/{offer_id}/publish",
-        )
-        if status == 200:
-            listing_id = resp.get("listingId", offer_id)
-            url = f"https://www.ebay.com/itm/{listing_id}"
-            return ListingResult(
-                success=True,
-                listing_id=listing_id,
-                url=url,
-                error=None,
-                raw=resp,
+        if self._ack_ok(root):
+            user_id    = _find(root, "User/UserID") or ""
+            reg_date   = (_find(root, "User/RegistrationDate") or "")[:10]
+            feedback   = _find(root, "User/FeedbackScore") or ""
+            env_label  = "🧪 サンドボックス" if SANDBOX else "🟢 本番環境"
+            return True, (
+                f"✅ eBay API 接続OK\n"
+                f"ユーザーID: {user_id}\n"
+                f"フィードバックスコア: {feedback}\n"
+                f"登録日: {reg_date}\n"
+                f"環境: {env_label}"
             )
-        return ListingResult(
-            success=False,
-            listing_id=None,
-            url=None,
-            error=json.dumps(resp.get("errors", resp)),
-            raw=resp,
-        )
+        return False, f"認証エラー: {_get_errors(root)}"
 
-    # ===== 高レベル API =====
+    # ── 出品 (AddItem) ────────────────────────────────────────────
     def create_listing(self, product: Any, price_usd: float) -> ListingResult:
         """
-        商品を eBay に出品する（在庫登録 → Offer作成 → 公開）。
+        商品を eBay に Fixed Price で出品する。
+
+        Args:
+            product: backend.db.models.Product インスタンス
+            price_usd: 販売価格（USD）
         """
-        # 1. Inventory Item 作成/更新
-        inv_result = self.create_or_update_inventory_item(product.sku, product)
-        if not inv_result.success:
-            return ListingResult(
-                success=False, listing_id=None, url=None,
-                error=f"Inventory error: {inv_result.error}", raw=None,
-            )
+        if not self.is_configured():
+            return ListingResult(success=False, error="APIキーが未設定です")
 
-        # 2. Offer 作成
-        ok, offer_id_or_err, _ = self.create_offer(product.sku, price_usd, product)
-        if not ok:
-            return ListingResult(
-                success=False, listing_id=None, url=None,
-                error=f"Offer error: {offer_id_or_err}", raw=None,
-            )
-
-        # 3. 公開
-        return self.publish_offer(offer_id_or_err)
-
-    def update_listing(self, listing_id: str, price_usd: Optional[float] = None, stock: Optional[int] = None) -> UpdateResult:
-        """価格・在庫を更新する"""
-        errors = []
-        if price_usd is not None:
-            body = {"price": {"currency": "USD", "value": f"{price_usd:.2f}"}}
-            status, resp = self._request(
-                "PUT",
-                f"/sell/inventory/v1/offer/{listing_id}/update_compliance",
-                json_body=body,
-            )
-            if status not in (200, 204):
-                errors.append(f"price: {resp}")
-
-        if stock is not None:
-            body2 = {"shipToLocationAvailability": {"quantity": stock}}
-            status2, resp2 = self._request(
-                "PUT",
-                f"/sell/inventory/v1/inventory_item/{listing_id}",
-                json_body=body2,
-            )
-            if status2 not in (200, 204):
-                errors.append(f"stock: {resp2}")
-
-        if errors:
-            return UpdateResult(success=False, error="; ".join(str(e) for e in errors))
-        return UpdateResult(success=True, error=None)
-
-    def end_listing(self, listing_id: str) -> UpdateResult:
-        """出品を停止する"""
-        status, resp = self._request(
-            "DELETE",
-            f"/sell/inventory/v1/offer/{listing_id}",
+        title = _esc((product.product_name_en or product.name)[:80])
+        desc  = self._build_description(product)
+        cat_val = (
+            product.product_category.value
+            if product.product_category and hasattr(product.product_category, "value")
+            else str(product.product_category or "other")
         )
-        if status in (200, 204):
-            return UpdateResult(success=True, error=None)
-        return UpdateResult(success=False, error=json.dumps(resp))
+        category_id  = CATEGORY_MAP.get(cat_val, "99")
+        condition_str = getattr(product, "condition", "New") or "New"
+        condition_id  = CONDITION_MAP.get(condition_str, "1000")
+        stock = max(int(product.current_stock or 0), 1)  # 0だと出品できない
+        pic_urls = self._build_pic_urls(product)
+        weight_kg = (product.weight_g or 500) / 1000
+
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<AddItemRequest xmlns="{NS}">
+  {_creds()}
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+  <Item>
+    <Title>{title}</Title>
+    <Description><![CDATA[{desc}]]></Description>
+    <PrimaryCategory>
+      <CategoryID>{category_id}</CategoryID>
+    </PrimaryCategory>
+    <StartPrice currencyID="USD">{price_usd:.2f}</StartPrice>
+    <ConditionID>{condition_id}</ConditionID>
+    <Country>JP</Country>
+    <Currency>USD</Currency>
+    <DispatchTimeMax>3</DispatchTimeMax>
+    <ListingDuration>GTC</ListingDuration>
+    <ListingType>FixedPriceItem</ListingType>
+    <Quantity>{stock}</Quantity>
+    <SKU>{_esc(product.sku)}</SKU>
+{pic_urls}
+    <ShippingDetails>
+      <ShippingType>Flat</ShippingType>
+      <ShippingServiceOptions>
+        <ShippingServicePriority>1</ShippingServicePriority>
+        <ShippingService>USPSMedia</ShippingService>
+        <ShippingServiceCost currencyID="USD">0.00</ShippingServiceCost>
+        <FreeShipping>true</FreeShipping>
+      </ShippingServiceOptions>
+      <InternationalShippingServiceOption>
+        <ShippingServicePriority>1</ShippingServicePriority>
+        <ShippingService>StandardIntl</ShippingService>
+        <ShippingServiceCost currencyID="USD">15.00</ShippingServiceCost>
+        <ShipToLocation>Worldwide</ShipToLocation>
+      </InternationalShippingServiceOption>
+    </ShippingDetails>
+    <ReturnPolicy>
+      <ReturnsAcceptedOption>ReturnsAccepted</ReturnsAcceptedOption>
+      <RefundOption>MoneyBack</RefundOption>
+      <ReturnsWithinOption>Days_30</ReturnsWithinOption>
+      <ShippingCostPaidByOption>Buyer</ShippingCostPaidByOption>
+      <Description>Contact us within 30 days for return.</Description>
+    </ReturnPolicy>
+    <ItemSpecifics>
+      <NameValueList>
+        <Name>Brand</Name>
+        <Value>Unbranded</Value>
+      </NameValueList>
+      <NameValueList>
+        <Name>Country/Region of Manufacture</Name>
+        <Value>Japan</Value>
+      </NameValueList>
+    </ItemSpecifics>
+    <Location>Japan</Location>
+    <PostalCode>100-0001</PostalCode>
+  </Item>
+</AddItemRequest>"""
+
+        try:
+            root = self._call("AddItem", xml)
+        except Exception as e:
+            return ListingResult(success=False, error=f"通信エラー: {e}")
+
+        if self._ack_ok(root):
+            item_id = _find(root, "ItemID") or ""
+            fee_el  = root.find(f".//{{{NS}}}Fee")
+            fee_val = float(fee_el.text) if fee_el is not None and fee_el.text else None
+            url = f"https://www.ebay.com/itm/{item_id}"
+            return ListingResult(
+                success=True,
+                listing_id=item_id,
+                url=url,
+                fees=fee_val,
+            )
+        return ListingResult(success=False, error=_get_errors(root))
+
+    # ── 価格・在庫更新 (ReviseItem) ───────────────────────────────
+    def update_price(self, item_id: str, price_usd: float) -> UpdateResult:
+        """出品中商品の価格を更新する"""
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<ReviseItemRequest xmlns="{NS}">
+  {_creds()}
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <Item>
+    <ItemID>{_esc(item_id)}</ItemID>
+    <StartPrice currencyID="USD">{price_usd:.2f}</StartPrice>
+  </Item>
+</ReviseItemRequest>"""
+
+        try:
+            root = self._call("ReviseItem", xml)
+        except Exception as e:
+            return UpdateResult(success=False, error=f"通信エラー: {e}")
+
+        if self._ack_ok(root):
+            return UpdateResult(success=True)
+        return UpdateResult(success=False, error=_get_errors(root))
+
+    def update_stock(self, item_id: str, quantity: int) -> UpdateResult:
+        """出品中商品の在庫数を更新する"""
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<ReviseItemRequest xmlns="{NS}">
+  {_creds()}
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <Item>
+    <ItemID>{_esc(item_id)}</ItemID>
+    <Quantity>{quantity}</Quantity>
+  </Item>
+</ReviseItemRequest>"""
+
+        try:
+            root = self._call("ReviseItem", xml)
+        except Exception as e:
+            return UpdateResult(success=False, error=f"通信エラー: {e}")
+
+        if self._ack_ok(root):
+            return UpdateResult(success=True)
+        return UpdateResult(success=False, error=_get_errors(root))
+
+    def update_listing(
+        self,
+        item_id: str,
+        price_usd: Optional[float] = None,
+        stock: Optional[int] = None,
+    ) -> UpdateResult:
+        """価格・在庫を一括更新する"""
+        if price_usd is None and stock is None:
+            return UpdateResult(success=True)
+
+        price_xml = f'<StartPrice currencyID="USD">{price_usd:.2f}</StartPrice>' if price_usd is not None else ""
+        stock_xml = f"<Quantity>{stock}</Quantity>" if stock is not None else ""
+
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<ReviseItemRequest xmlns="{NS}">
+  {_creds()}
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <Item>
+    <ItemID>{_esc(item_id)}</ItemID>
+    {price_xml}
+    {stock_xml}
+  </Item>
+</ReviseItemRequest>"""
+
+        try:
+            root = self._call("ReviseItem", xml)
+        except Exception as e:
+            return UpdateResult(success=False, error=f"通信エラー: {e}")
+
+        if self._ack_ok(root):
+            return UpdateResult(success=True)
+        return UpdateResult(success=False, error=_get_errors(root))
+
+    # ── 出品停止 (EndItem) ────────────────────────────────────────
+    def end_listing(self, item_id: str, reason: str = "NotAvailable") -> UpdateResult:
+        """
+        出品を停止する。
+
+        reason: LostOrBroken / NotAvailable / OtherListingError / SellToHighBidder
+        """
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<EndItemRequest xmlns="{NS}">
+  {_creds()}
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <ItemID>{_esc(item_id)}</ItemID>
+  <EndingReason>{reason}</EndingReason>
+</EndItemRequest>"""
+
+        try:
+            root = self._call("EndItem", xml)
+        except Exception as e:
+            return UpdateResult(success=False, error=f"通信エラー: {e}")
+
+        if self._ack_ok(root):
+            return UpdateResult(success=True)
+        return UpdateResult(success=False, error=_get_errors(root))
+
+    # ── 出品中商品一覧 (GetMyeBaySelling) ────────────────────────
+    def get_active_listings(self, page: int = 1, per_page: int = 100) -> Tuple[List[ActiveListing], str]:
+        """
+        出品中商品の一覧を取得する。
+
+        Returns:
+            (listings, error_msg) — エラー時は listings=[], error_msg にメッセージ
+        """
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="{NS}">
+  {_creds()}
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <WarningLevel>High</WarningLevel>
+  <ActiveList>
+    <Include>true</Include>
+    <Pagination>
+      <EntriesPerPage>{per_page}</EntriesPerPage>
+      <PageNumber>{page}</PageNumber>
+    </Pagination>
+    <Sort>TimeLeft</Sort>
+  </ActiveList>
+</GetMyeBaySellingRequest>"""
+
+        try:
+            root = self._call("GetMyeBaySelling", xml)
+        except Exception as e:
+            return [], f"通信エラー: {e}"
+
+        if not self._ack_ok(root):
+            return [], _get_errors(root)
+
+        listings: List[ActiveListing] = []
+        for item in root.findall(f".//{{{NS}}}ActiveList/{{{NS}}}ItemArray/{{{NS}}}Item"):
+            item_id = item.findtext(f"{{{NS}}}ItemID") or ""
+            title   = item.findtext(f"{{{NS}}}Title") or ""
+
+            # 現在価格
+            price_el = item.find(f".//{{{NS}}}CurrentPrice")
+            price = float(price_el.text) if price_el is not None and price_el.text else 0.0
+
+            qty       = int(item.findtext(f"{{{NS}}}Quantity") or 0)
+            qty_sold  = int(item.findtext(f"{{{NS}}}QuantitySold") or 0)
+            start_t   = item.findtext(f"{{{NS}}}ListingDetails/{{{NS}}}StartTime") or ""
+            end_t     = item.findtext(f"{{{NS}}}ListingDetails/{{{NS}}}EndTime") or ""
+            url       = item.findtext(f"{{{NS}}}ListingDetails/{{{NS}}}ViewItemURL") or f"https://www.ebay.com/itm/{item_id}"
+
+            listings.append(ActiveListing(
+                item_id=item_id,
+                title=title,
+                price_usd=price,
+                quantity=qty,
+                quantity_sold=qty_sold,
+                url=url,
+                start_time=start_t[:10] if start_t else None,
+                end_time=end_t[:10] if end_t else None,
+            ))
+
+        return listings, ""
+
+    # ── 個別商品情報取得 (GetItem) ────────────────────────────────
+    def get_item(self, item_id: str) -> Tuple[Optional[Dict], str]:
+        """出品中の個別商品情報を取得する"""
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<GetItemRequest xmlns="{NS}">
+  {_creds()}
+  <ErrorLanguage>en_US</ErrorLanguage>
+  <ItemID>{_esc(item_id)}</ItemID>
+  <DetailLevel>ReturnAll</DetailLevel>
+</GetItemRequest>"""
+
+        try:
+            root = self._call("GetItem", xml)
+        except Exception as e:
+            return None, f"通信エラー: {e}"
+
+        if not self._ack_ok(root):
+            return None, _get_errors(root)
+
+        item = root.find(f"{{{NS}}}Item")
+        if item is None:
+            return None, "商品情報が取得できませんでした"
+
+        price_el = item.find(f".//{{{NS}}}StartPrice")
+        return {
+            "item_id":   item.findtext(f"{{{NS}}}ItemID") or "",
+            "title":     item.findtext(f"{{{NS}}}Title") or "",
+            "price_usd": float(price_el.text) if price_el is not None and price_el.text else 0.0,
+            "quantity":  int(item.findtext(f"{{{NS}}}Quantity") or 0),
+            "status":    item.findtext(f"{{{NS}}}SellingStatus/{{{NS}}}ListingStatus") or "",
+            "url":       item.findtext(f"{{{NS}}}ListingDetails/{{{NS}}}ViewItemURL") or "",
+        }, ""
+
+    # ── ヘルパー ──────────────────────────────────────────────────
+    def _build_description(self, product: Any) -> str:
+        """eBay 用 HTML 説明文を生成"""
+        name = product.product_name_en or product.name
+        desc = product.product_description_en or product.description or ""
+        specs: List[str] = []
+        if product.weight_g:
+            specs.append(f"<li>Weight: {product.weight_g:.0f}g</li>")
+        if product.jan_code:
+            specs.append(f"<li>JAN: {product.jan_code}</li>")
+        if product.upc_code:
+            specs.append(f"<li>UPC: {product.upc_code}</li>")
+        if product.asin:
+            specs.append(f"<li>ASIN: {product.asin}</li>")
+        spec_html = f"<ul>{''.join(specs)}</ul>" if specs else ""
+
+        return f"""<div style="font-family:Arial,sans-serif;max-width:800px;margin:0 auto;color:#333;">
+<h2 style="border-bottom:2px solid #e53935;padding-bottom:8px;">{_esc(name)}</h2>
+<p style="line-height:1.7;">{_esc(desc)}</p>
+{spec_html}
+<hr style="margin:20px 0;border-color:#eee;"/>
+<p style="background:#fff9c4;padding:12px;border-radius:6px;">
+  <strong>📦 Shipping from Japan</strong><br/>
+  Estimated delivery: 7–14 business days via EMS or DHL.<br/>
+  All items are carefully inspected before shipping.
+</p>
+<p style="font-size:11px;color:#999;margin-top:16px;">
+  Sold by GlobalBiz Japan. Please contact us with any questions.
+</p>
+</div>"""
+
+    def _build_pic_urls(self, product: Any) -> str:
+        """PictureDetails XML を生成"""
+        urls: List[str] = []
+        if product.image_urls and isinstance(product.image_urls, list):
+            urls = [u for u in product.image_urls if u]
+        if product.image_url and product.image_url not in urls:
+            urls.insert(0, product.image_url)
+        if not urls:
+            return ""
+        pics = "".join(f"    <PictureURL>{_esc(u)}</PictureURL>\n" for u in urls[:12])
+        return f"    <PictureDetails>\n{pics}    </PictureDetails>"
 
     def is_configured(self) -> bool:
-        return bool(self.token)
-
-    def test_connection(self) -> Tuple[bool, str]:
-        """接続テスト"""
-        if not self.token:
-            return False, "EBAY_TOKEN が未設定です"
-        status, resp = self._request("GET", "/sell/inventory/v1/inventory_item", params={"limit": 1})
-        if status == 200:
-            return True, "接続OK"
-        if status == 401:
-            return False, "認証エラー: EBAY_TOKEN を確認してください"
-        return False, f"エラー {status}: {resp}"
+        return bool(self.app_id and self.dev_id and self.cert_id and self.user_token)
 
 
-# モジュールレベルのシングルトン
+# ── シングルトン ──────────────────────────────────────────────────
 _client: Optional[EbayClient] = None
+
 
 def get_ebay_client() -> EbayClient:
     global _client
