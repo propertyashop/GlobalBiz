@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import os
 import time
 import json
+import base64
 import importlib
 from typing import Optional
 import pandas as pd
@@ -127,6 +128,21 @@ _PROFIT_CACHE: dict = {}
 
 # ページネーション
 PAGE_SIZE = 50
+
+# ── No Image プレースホルダー（base64 SVG）──
+_NO_IMG_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="60" height="60">'
+    '<rect width="60" height="60" fill="#EEEEEE" rx="6"/>'
+    '<text x="50%" y="44%" text-anchor="middle" dominant-baseline="middle"'
+    ' font-size="22" font-family="sans-serif">📷</text>'
+    '<text x="50%" y="76%" text-anchor="middle" dominant-baseline="middle"'
+    ' font-size="9" font-family="sans-serif" fill="#AAAAAA">No Image</text>'
+    "</svg>"
+)
+NO_IMAGE_PLACEHOLDER: str = (
+    "data:image/svg+xml;base64,"
+    + base64.b64encode(_NO_IMG_SVG.encode()).decode()
+)
 
 # ── カテゴリ別利益率の env キー ──
 CATEGORY_PROFIT_KEYS = {
@@ -305,31 +321,45 @@ def get_product_all_images(product) -> list:
     return [main] if main else []
 
 
-def products_to_df(products: list) -> pd.DataFrame:
-    rows = []
+def products_to_dfs(products: list):
+    """
+    商品リストを2つの DataFrame に変換して返す。
+      df_main   — 常時表示（サムネイル・商品名・仕入れ・利益率・USD・ステータス）
+      df_detail — 折りたたみ表示（SGD/TWD/MYR/PHP・利益額・在庫・eBay/Shopee）
+    """
+    main_rows = []
+    detail_rows = []
     for p in products:
         ebay_st   = "🟢 出品中" if p.ebay_listing_id else ("⬜ 対象" if p.target_ebay else "—")
         shopee_st = "🟢 出品中" if p.shopee_item_id else ("⬜ 対象" if p.target_shopee else "—")
         pf = calc_profit_for_product(p)
         profit_rate = pf.get("profit_rate", 0)
         profit_jpy  = pf.get("profit_jpy", 0)
-        # 利益率 警告
+
+        # 利益率表示 with 警告アイコン
         rate_str = f"{profit_rate*100:.1f}%"
         if profit_rate < 0.05 and pf:
             rate_str = f"🔴 {profit_rate*100:.1f}%"
         elif profit_rate < 0.10 and pf:
             rate_str = f"🟡 {profit_rate*100:.1f}%"
-        main_img = get_product_main_image(p)
-        rows.append({
-            "画像":     main_img or "",
-            "ID":       p.id,
-            "SKU":      p.sku,
-            "商品名":   p.name[:30] + ("…" if len(p.name) > 30 else ""),
+
+        # 画像 URL（なければ No Image プレースホルダー）
+        main_img = get_product_main_image(p) or NO_IMAGE_PLACEHOLDER
+
+        main_rows.append({
+            "画像":     main_img,
+            "商品名":   p.name[:35] + ("…" if len(p.name) > 35 else ""),
             "仕入れ元": SOURCE_LABELS.get(p.source_site, str(p.source_site)),
             "仕入れ値": f"¥{p.cost_price:,.0f}",
             "利益率":   rate_str if pf else "—",
+            "推奨USD":  f"${pf['price_usd']:,.2f}" if pf.get("price_usd") else "—",
+            "状態":     STATUS_LABELS.get(p.status, str(p.status)),
+            "_id":      p.id,          # ソート・紐付け用（表示しない）
+        })
+        detail_rows.append({
+            "商品名":   p.name[:25] + ("…" if len(p.name) > 25 else ""),
+            "SKU":      p.sku,
             "利益額":   f"¥{profit_jpy:,.0f}" if pf else "—",
-            "推奨USD":  f"${pf['price_usd']:,.2f}"  if pf.get("price_usd") else "—",
             "推奨SGD":  f"S${pf['price_sgd']:,.2f}" if pf.get("price_sgd") else "—",
             "推奨TWD":  f"NT${pf['price_twd']:,.0f}" if pf.get("price_twd") else "—",
             "推奨MYR":  f"RM{pf['price_myr']:,.2f}"  if pf.get("price_myr") else "—",
@@ -337,9 +367,14 @@ def products_to_df(products: list) -> pd.DataFrame:
             "在庫":     p.current_stock,
             "eBay":     ebay_st,
             "Shopee":   shopee_st,
-            "状態":     STATUS_LABELS.get(p.status, str(p.status)),
         })
-    return pd.DataFrame(rows)
+    return pd.DataFrame(main_rows), pd.DataFrame(detail_rows)
+
+
+# 後方互換エイリアス
+def products_to_df(products: list) -> pd.DataFrame:
+    df_main, _ = products_to_dfs(products)
+    return df_main
 
 
 def calc_profit_preview(
@@ -515,11 +550,11 @@ if page == "📦 商品一覧":
     if not products and total_filtered == 0:
         st.info("商品がありません。「➕ 商品登録」から追加してください。")
     else:
-        df = products_to_df(products)
+        df_main, df_detail = products_to_dfs(products)
 
-        # ── 画像サムネイル付きデータフレーム ──
+        # ── メインテーブル（常時表示・最適化カラム）──
         st.dataframe(
-            df,
+            df_main.drop(columns=["_id"]),
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -528,16 +563,36 @@ if page == "📦 商品一覧":
                     help="商品画像（クリックで拡大）",
                     width="small",
                 ),
-                "ID":     st.column_config.NumberColumn("ID", width="small"),
-                "SKU":    st.column_config.TextColumn("SKU", width="medium"),
-                "商品名": st.column_config.TextColumn("商品名", width="large"),
+                "商品名":   st.column_config.TextColumn("商品名",   width="large"),
+                "仕入れ元": st.column_config.TextColumn("仕入れ元", width="small"),
                 "仕入れ値": st.column_config.TextColumn("仕入れ値", width="small"),
-                "利益率": st.column_config.TextColumn("利益率", width="small"),
-                "利益額": st.column_config.TextColumn("利益額", width="small"),
-                "在庫":   st.column_config.NumberColumn("在庫", width="small"),
+                "利益率":   st.column_config.TextColumn("利益率",   width="small"),
+                "推奨USD":  st.column_config.TextColumn("推奨USD",  width="small"),
+                "状態":     st.column_config.TextColumn("状態",     width="small"),
             },
             row_height=64,
         )
+
+        # ── 詳細カラム（折りたたみ）──
+        with st.expander("📊 詳細カラムを表示（SGD/TWD/MYR/PHP・利益額・在庫・出品状況）"):
+            st.dataframe(
+                df_detail,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "商品名":  st.column_config.TextColumn("商品名",  width="medium"),
+                    "SKU":     st.column_config.TextColumn("SKU",     width="small"),
+                    "利益額":  st.column_config.TextColumn("利益額",  width="small"),
+                    "推奨SGD": st.column_config.TextColumn("推奨SGD", width="small"),
+                    "推奨TWD": st.column_config.TextColumn("推奨TWD", width="small"),
+                    "推奨MYR": st.column_config.TextColumn("推奨MYR", width="small"),
+                    "推奨PHP": st.column_config.TextColumn("推奨PHP", width="small"),
+                    "在庫":    st.column_config.NumberColumn("在庫",  width="small"),
+                    "eBay":    st.column_config.TextColumn("eBay",    width="small"),
+                    "Shopee":  st.column_config.TextColumn("Shopee",  width="small"),
+                },
+                row_height=40,
+            )
 
         # ── 画像拡大ビューア（選択商品のギャラリー）──
         with st.expander("🔍 画像を拡大表示", expanded=False):
