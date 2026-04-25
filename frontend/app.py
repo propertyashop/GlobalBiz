@@ -22,6 +22,7 @@ from backend.db.models import Product, ProductStatus, SourceSite, ProductCategor
 from backend.calculators.tariff import (
     calculate_tariff, COUNTRY_NAMES, EBAY_COUNTRIES, SHOPEE_COUNTRIES,
 )
+from backend.calculators import tariff_v2 as _tariff_v2
 from backend.calculators.shipping import (
     calculate_domestic_shipping, calculate_international_shipping,
     DomesticCarrier, IntlCarrier,
@@ -390,6 +391,8 @@ def calc_profit_preview(
     twd_rate: float = 4.7,
     myr_rate: float = 33.0,
     php_rate: float = 2.7,
+    hs_code: str = "",
+    duty_bearer: str = "DDP",
 ) -> dict:
     if cost_price <= 0:
         return {}
@@ -397,31 +400,70 @@ def calc_profit_preview(
     dom = calculate_domestic_shipping(weight_g or 500, size_l, size_w, size_h)
     domestic_ship = dom.fee_jpy
 
-    intl_ships = {}
-    tariffs = {}
-    for code in target_countries:
-        r = calculate_international_shipping(weight_g or 500, code, IntlCarrier.EMS)
-        intl_ships[code] = r.fee_jpy
-        t = calculate_tariff(cost_price, code, category_val, usd_rate)
-        tariffs[code] = t.tariff_amount_jpy
-
     results: dict = {}
     usd_prices, sgd_prices, twd_prices, myr_prices, php_prices = [], [], [], [], []
 
     for code in target_countries:
-        intl   = intl_ships.get(code, 0)
-        tariff = tariffs.get(code, 0)
-        total_cost = cost_price + domestic_ship + intl + tariff
+        intl_r = calculate_international_shipping(weight_g or 500, code, IntlCarrier.EMS)
+        intl = intl_r.fee_jpy
 
+        # ── 関税・輸入税の計算 ──────────────────────────────────────
+        # tariff_v2 対応国（US/SG/TW/MY/PH）は新モジュールで計算
+        duty_jpy = 0.0
+        vat_jpy = 0.0
+        duty_rate = 0.0
+        vat_rate = 0.0
+        vat_name = ""
+        is_under_de_minimis = False
+        de_minimis_info = ""
+
+        if _tariff_v2.is_supported_country(code):
+            try:
+                info = _tariff_v2.get_country_info(code)
+                cif_jpy = cost_price + intl
+                fx = _tariff_v2.get_exchange_rate(info["currency"])
+                cif_local = cif_jpy / fx if fx else 0.0
+                de_min = info.get("de_minimis_local")
+
+                if de_min is not None and cif_local <= de_min:
+                    is_under_de_minimis = True
+                    de_minimis_info = (
+                        f"{info['currency']} {de_min:,.0f} 以下のため免税"
+                    )
+                else:
+                    duty_rate = _tariff_v2.resolve_duty_rate(code, hs_code or None)
+                    duty_jpy = cif_jpy * duty_rate
+                    vat_rate = info.get("vat_rate", 0.0)
+                    vat_name = info.get("vat_name", "")
+                    vat_jpy = (cif_jpy + duty_jpy) * vat_rate
+            except Exception:
+                # フォールバック: 旧モジュール
+                t = calculate_tariff(cost_price, code, category_val, usd_rate)
+                duty_jpy = t.tariff_amount_jpy
+        else:
+            # tariff_v2 未対応国: 旧モジュールで関税のみ
+            t = calculate_tariff(cost_price, code, category_val, usd_rate)
+            duty_jpy = t.tariff_amount_jpy
+
+        # ── 価格計算 ────────────────────────────────────────────────
         is_ebay   = code in EBAY_COUNTRIES
         is_shopee = code in SHOPEE_COUNTRIES
         mkt_fee   = ebay_fee if is_ebay else shopee_fee
         total_fee = mkt_fee + payment_fee + fx_fee
 
+        # DDP: セラーが関税+VATを負担 → 原価に含めて価格算出
+        # DDU: バイヤーが負担 → 原価に含めず価格算出
+        if duty_bearer == "DDP":
+            base_cost = cost_price + domestic_ship + intl + duty_jpy + vat_jpy
+            buyer_burden = 0.0
+        else:
+            base_cost = cost_price + domestic_ship + intl
+            buyer_burden = duty_jpy + vat_jpy
+
         denom = 1 - total_fee - target_profit_rate
         if denom <= 0:
             denom = 0.1
-        price_jpy = total_cost / denom
+        price_jpy = base_cost / denom
 
         price_usd = price_jpy / usd_rate
         price_sgd = price_jpy / sgd_rate
@@ -429,25 +471,38 @@ def calc_profit_preview(
         price_myr = price_jpy / myr_rate
         price_php = price_jpy / php_rate
         profit_jpy = price_jpy * target_profit_rate
+        fee_jpy = price_jpy * total_fee
 
         results[code] = {
-            "country":      COUNTRY_NAMES.get(code, code),
-            "cost":         cost_price,
-            "domestic_ship": domestic_ship,
-            "intl_ship":    intl,
-            "tariff":       tariff,
-            "total_cost":   total_cost,
-            "fee_rate":     total_fee,
-            "price_jpy":    price_jpy,
-            "price_usd":    price_usd,
-            "price_sgd":    price_sgd,
-            "price_twd":    price_twd,
-            "price_myr":    price_myr,
-            "price_php":    price_php,
-            "profit_jpy":   profit_jpy,
-            "profit_rate":  target_profit_rate,
-            "is_ebay":      is_ebay,
-            "marketplace":  "eBay" if is_ebay else "Shopee",
+            "country":             COUNTRY_NAMES.get(code, code),
+            "cost":                cost_price,
+            "domestic_ship":       domestic_ship,
+            "intl_ship":           intl,
+            # 後方互換キー
+            "tariff":              duty_jpy,
+            # 新キー（詳細内訳）
+            "duty_jpy":            duty_jpy,
+            "duty_rate":           duty_rate,
+            "vat_jpy":             vat_jpy,
+            "vat_rate":            vat_rate,
+            "vat_name":            vat_name,
+            "is_under_de_minimis": is_under_de_minimis,
+            "de_minimis_info":     de_minimis_info,
+            "duty_bearer":         duty_bearer,
+            "buyer_burden_jpy":    buyer_burden,
+            "total_cost":          base_cost,
+            "fee_rate":            total_fee,
+            "fee_jpy":             fee_jpy,
+            "price_jpy":           price_jpy,
+            "price_usd":           price_usd,
+            "price_sgd":           price_sgd,
+            "price_twd":           price_twd,
+            "price_myr":           price_myr,
+            "price_php":           price_php,
+            "profit_jpy":          profit_jpy,
+            "profit_rate":         target_profit_rate,
+            "is_ebay":             is_ebay,
+            "marketplace":         "eBay" if is_ebay else "Shopee",
         }
         if is_ebay:
             usd_prices.append(price_usd)
@@ -460,6 +515,7 @@ def calc_profit_preview(
     return {
         "countries":     results,
         "domestic_ship": domestic_ship,
+        "duty_bearer":   duty_bearer,
         "avg_price_usd": sum(usd_prices) / len(usd_prices) if usd_prices else None,
         "avg_price_sgd": sum(sgd_prices) / len(sgd_prices) if sgd_prices else None,
         "avg_price_twd": sum(twd_prices) / len(twd_prices) if twd_prices else None,
@@ -1562,6 +1618,8 @@ elif page == "➕ 商品登録":
         preview_cat       = st.session_state.get("preview_cat", "electronics")
         preview_countries = st.session_state.get("preview_countries", ["USA", "SGP"])
         preview_profit    = st.session_state.get("preview_profit", 0.25)
+        preview_hs        = st.session_state.get("preview_hs", "")
+        preview_incoterm  = st.session_state.get("preview_incoterm", "DDP")
 
         with st.form("preview_form"):
             prev_cost_in = st.number_input("仕入れ値（円）", value=float(preview_cost), step=100.0)
@@ -1583,6 +1641,27 @@ elif page == "➕ 商品登録":
                 f"利益率（{prev_cat_in}の既定: {_auto_rate*100:.0f}%）",
                 5, 60, int(_auto_rate * 100), step=5, format="%d%%",
             ) / 100
+            # ── 関税設定 ──────────────────────────
+            st.caption("🛃 関税・輸入税設定")
+            _hs_default = HS_CODE_DEFAULTS.get(prev_cat_in, "")
+            prev_hs_in = st.text_input(
+                "HSコード",
+                value=preview_hs or _hs_default,
+                placeholder="例: 8517.13",
+                help="空欄の場合はカテゴリのデフォルト税率を使用",
+            )
+            prev_incoterm_in = st.radio(
+                "関税負担方式",
+                ["DDP", "DDU"],
+                index=0 if preview_incoterm == "DDP" else 1,
+                horizontal=True,
+                format_func=lambda v: (
+                    "🟢 DDP（セラー負担・販売価格に転嫁）"
+                    if v == "DDP"
+                    else "🔵 DDU（バイヤー負担・参考表示のみ）"
+                ),
+                help="DDP: 関税をセラーが払い価格に上乗せ。DDU: バイヤーが通関時に支払い（参考表示）",
+            )
             calc_btn = st.form_submit_button("🔄 計算プレビュー更新", use_container_width=True)
 
         if calc_btn:
@@ -1590,10 +1669,12 @@ elif page == "➕ 商品登録":
                 "preview_cost": prev_cost_in, "preview_weight": prev_weight_in,
                 "preview_cat": prev_cat_in, "preview_countries": prev_countries_in,
                 "preview_profit": prev_profit_in,
+                "preview_hs": prev_hs_in, "preview_incoterm": prev_incoterm_in,
             })
             preview_cost = prev_cost_in; preview_weight = prev_weight_in
             preview_cat = prev_cat_in; preview_countries = prev_countries_in
             preview_profit = prev_profit_in
+            preview_hs = prev_hs_in; preview_incoterm = prev_incoterm_in
 
         if preview_cost > 0 and preview_countries:
             calc = calc_profit_preview(
@@ -1601,37 +1682,95 @@ elif page == "➕ 商品登録":
                 preview_cat, preview_countries, preview_profit,
                 usd_rate, sgd_rate, ebay_fee, shopee_fee, payment_fee, fx_fee,
                 twd_rate, myr_rate, php_rate,
+                hs_code=preview_hs, duty_bearer=preview_incoterm,
             )
             if calc:
+                # ── ヘッダ情報 ──────────────────────────────────
+                _bearer = calc.get("duty_bearer", "DDP")
+                _bearer_badge = (
+                    "🟢 **DDP** — 関税・輸入税はセラー負担（価格に転嫁）"
+                    if _bearer == "DDP"
+                    else "🔵 **DDU** — 関税・輸入税はバイヤー負担（参考表示）"
+                )
+                st.caption(_bearer_badge)
                 st.markdown(f"**国内送料（推定）:** ¥{calc.get('domestic_ship',0):,.0f}")
-                for code, r in calc.get("countries", {}).items():
-                    with st.expander(
-                        f"{'🇺🇸' if r['is_ebay'] else '🌏'} {r['country']}（{r['marketplace']}）",
-                        expanded=True
-                    ):
-                        for lbl, val in [
-                            ("仕入れ値", f"¥{r['cost']:,.0f}"),
-                            ("国内送料", f"¥{r['domestic_ship']:,.0f}"),
-                            ("国際送料", f"¥{r['intl_ship']:,.0f}"),
-                            ("関税",     f"¥{r['tariff']:,.0f}"),
-                            ("総コスト", f"¥{r['total_cost']:,.0f}"),
-                            ("手数料率", f"{r['fee_rate']*100:.1f}%"),
-                        ]:
-                            cc1, cc2 = st.columns([2,1])
-                            cc1.write(lbl); cc2.write(val)
-                        st.divider()
-                        if r["is_ebay"]:
-                            st.markdown(f"**推奨: ${r['price_usd']:,.2f} USD**")
-                        else:
-                            lines = [f"SGD: S${r['price_sgd']:,.2f}"]
-                            if code == "TWN": lines.append(f"TWD: NT${r['price_twd']:,.0f}")
-                            elif code == "MYS": lines.append(f"MYR: RM{r['price_myr']:,.2f}")
-                            elif code == "PHL": lines.append(f"PHP: ₱{r['price_php']:,.0f}")
-                            st.markdown("**推奨: " + " / ".join(lines) + "**")
-                        st.markdown(f"**見込み利益: ¥{r['profit_jpy']:,.0f}  "
-                                    f"（{r['profit_rate']*100:.0f}%）**")
 
-                # サマリ
+                for code, r in calc.get("countries", {}).items():
+                    flag = "🇺🇸" if r["is_ebay"] else "🌏"
+                    exempt_tag = " ✅免税" if r.get("is_under_de_minimis") else ""
+                    with st.expander(
+                        f"{flag} {r['country']}（{r['marketplace']}）{exempt_tag}",
+                        expanded=True,
+                    ):
+                        # ── コスト内訳 ─────────────────────────
+                        _duty_label = (
+                            f"関税 ({r['duty_rate']*100:.1f}%)"
+                            if r.get("duty_rate", 0) > 0
+                            else "関税"
+                        )
+                        _vat_label = (
+                            f"{r['vat_name'] or 'VAT'} ({r['vat_rate']*100:.1f}%)"
+                            if r.get("vat_rate", 0) > 0
+                            else f"{r.get('vat_name', 'VAT')}"
+                        )
+                        _duty_val = (
+                            "¥0（免税）"
+                            if r.get("is_under_de_minimis")
+                            else f"¥{r['duty_jpy']:,.0f}"
+                        )
+                        _vat_val = (
+                            "¥0（免税）"
+                            if r.get("is_under_de_minimis")
+                            else f"¥{r['vat_jpy']:,.0f}"
+                        )
+                        breakdown_rows = [
+                            ("仕入れ値",           f"¥{r['cost']:,.0f}"),
+                            ("国内送料",           f"¥{r['domestic_ship']:,.0f}"),
+                            ("国際送料",           f"¥{r['intl_ship']:,.0f}"),
+                            (_duty_label,          _duty_val),
+                            (_vat_label,           _vat_val),
+                            (f"{r['marketplace']}手数料 ({r['fee_rate']*100:.1f}%)",
+                                                   f"¥{r.get('fee_jpy', r['price_jpy']*r['fee_rate']):,.0f}"),
+                        ]
+                        for lbl, val in breakdown_rows:
+                            cc1, cc2 = st.columns([2, 1])
+                            cc1.caption(lbl)
+                            cc2.caption(val)
+
+                        # 免税メモ
+                        if r.get("de_minimis_info"):
+                            st.caption(f"ℹ️ {r['de_minimis_info']}")
+                        # DDU バイヤー負担
+                        if _bearer == "DDU" and r.get("buyer_burden_jpy", 0) > 0:
+                            st.caption(
+                                f"📦 バイヤー負担（関税+{r.get('vat_name','VAT')}）: "
+                                f"¥{r['buyer_burden_jpy']:,.0f}（参考）"
+                            )
+
+                        st.divider()
+
+                        # ── 推奨価格・利益 ──────────────────────
+                        if r["is_ebay"]:
+                            st.markdown(f"**推奨販売価格: ${r['price_usd']:,.2f} USD**"
+                                        f"　（¥{r['price_jpy']:,.0f}）")
+                        else:
+                            price_lines = [f"S${r['price_sgd']:,.2f} SGD"]
+                            if code == "TWN":  price_lines.append(f"NT${r['price_twd']:,.0f} TWD")
+                            elif code == "MYS": price_lines.append(f"RM{r['price_myr']:,.2f} MYR")
+                            elif code == "PHL": price_lines.append(f"₱{r['price_php']:,.0f} PHP")
+                            st.markdown(
+                                "**推奨販売価格: " + " / ".join(price_lines) + "**"
+                                + f"　（¥{r['price_jpy']:,.0f}）"
+                            )
+
+                        _profit_color = "🟢" if r["profit_jpy"] >= 0 else "🔴"
+                        st.markdown(
+                            f"{_profit_color} **純利益: ¥{r['profit_jpy']:,.0f}"
+                            f"　（利益率 {r['profit_rate']*100:.0f}%）**"
+                        )
+
+                # ── サマリ ──────────────────────────────────────
+                st.divider()
                 if calc.get("avg_price_usd"):
                     st.success(f"✅ eBay 推奨: **${calc['avg_price_usd']:,.2f} USD**")
                 if calc.get("avg_price_sgd"):
@@ -1656,6 +1795,8 @@ elif page == "➕ 商品登録":
                 final_profit = profit_rate_override if profit_rate_override > 0 else get_profit_rate(category_val)
                 calc_prices = {}
                 if cost_price_val > 0 and target_countries_val:
+                    _reg_hs = st.session_state.get("preview_hs", "")
+                    _reg_incoterm = st.session_state.get("preview_incoterm", "DDP")
                     calc_prices = calc_profit_preview(
                         cost_price_val, weight_g_val or 500,
                         size_l_val, size_w_val, size_h_val,
@@ -1663,6 +1804,7 @@ elif page == "➕ 商品登録":
                         final_profit, usd_rate, sgd_rate,
                         ebay_fee, shopee_fee, payment_fee, fx_fee,
                         twd_rate, myr_rate, php_rate,
+                        hs_code=_reg_hs, duty_bearer=_reg_incoterm,
                     )
 
                 avg_usd = calc_prices.get("avg_price_usd")
