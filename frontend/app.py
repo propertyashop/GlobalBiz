@@ -753,45 +753,89 @@ if page == "📦 商品一覧":
         # クイック出品
         st.divider()
         st.subheader("🚀 クイック出品")
-        product_options = {f"[{p.id}] {p.sku} - {p.name[:30]}": p.id for p in products}
-        sel = st.selectbox("商品を選択", list(product_options.keys()))
-        sel_id = product_options[sel]
 
-        with get_session() as s:
-            sel_p = s.query(Product).filter(Product.id == sel_id).first()
+        if not products:
+            st.info("商品がありません。「➕ 商品登録」から商品を追加してください。")
+        else:
+            product_options = {f"[{p.id}] {p.sku} — {p.name[:35]}": p.id for p in products}
+            sel = st.selectbox("商品を選択", list(product_options.keys()),
+                               key="quick_list_sel")
+            sel_id = product_options[sel]
+
+            with get_session() as s:
+                sel_p = s.query(Product).filter(Product.id == sel_id).first()
+
             if sel_p:
                 pf = calc_profit_for_product(sel_p)
                 _qs_img = get_product_main_image(sel_p)
-                _qs_img_col, _qs_info_col = st.columns([1, 4])
-                with _qs_img_col:
+
+                # ── 画像（左）+ 商品情報グリッド（右）──
+                _qs_left, _qs_right = st.columns([1, 3], gap="medium")
+
+                with _qs_left:
                     if _qs_img:
                         try:
-                            st.image(_qs_img, use_container_width=True)
+                            st.image(_qs_img, width=120)
                         except Exception:
-                            st.caption("📷")
+                            st.markdown(
+                                "<div style='width:120px;height:120px;background:#EEEEEE;"
+                                "display:flex;align-items:center;justify-content:center;"
+                                "border-radius:10px;font-size:2rem'>📷</div>",
+                                unsafe_allow_html=True,
+                            )
                     else:
                         st.markdown(
-                            "<div style='width:80px;height:80px;background:#f0f0f0;"
-                            "display:flex;align-items:center;justify-content:center;"
-                            "border-radius:8px;font-size:1.5rem'>📷</div>",
+                            "<div style='width:120px;height:120px;background:#EEEEEE;"
+                            "display:flex;flex-direction:column;align-items:center;"
+                            "justify-content:center;border-radius:10px;gap:4px'>"
+                            "<span style='font-size:2rem'>📷</span>"
+                            "<span style='font-size:0.7rem;color:#AAA'>No Image</span>"
+                            "</div>",
                             unsafe_allow_html=True,
                         )
-                with _qs_info_col:
-                    pc1, pc2, pc3, pc4 = st.columns(4)
-                    pc1.info(f"**仕入れ値:** ¥{sel_p.cost_price:,.0f}")
-                    pc2.info(f"**推奨USD:** {'${:,.2f}'.format(pf['price_usd']) if pf.get('price_usd') else '未計算'}")
-                    pc3.info(f"**推奨SGD:** {'S${:,.2f}'.format(pf['price_sgd']) if pf.get('price_sgd') else '未計算'}")
-                    pc4.info(f"**利益率:** {pf['profit_rate']*100:.1f}%" if pf.get("profit_rate") is not None else "**利益率:** —")
 
-        bc1, bc2 = st.columns(2)
-        if bc1.button("🟦 eBay に出品", use_container_width=True):
-            st.session_state["listing_target"] = (sel_id, "ebay")
-            st.session_state["show_listing_modal"] = True
-            st.rerun()
-        if bc2.button("🟧 Shopee に出品", use_container_width=True):
-            st.session_state["listing_target"] = (sel_id, "shopee")
-            st.session_state["show_listing_modal"] = True
-            st.rerun()
+                with _qs_right:
+                    st.markdown(f"**{sel_p.name[:50]}**")
+                    # 2列×2行グリッド
+                    _mg1, _mg2 = st.columns(2)
+                    _mg1.metric(
+                        "💴 仕入れ値",
+                        f"¥{sel_p.cost_price:,.0f}",
+                    )
+                    _mg2.metric(
+                        "📈 利益率",
+                        f"{pf['profit_rate']*100:.1f}%" if pf.get("profit_rate") is not None else "—",
+                    )
+                    _mg3, _mg4 = st.columns(2)
+                    _mg3.metric(
+                        "🟦 推奨USD",
+                        f"${pf['price_usd']:,.2f}" if pf.get("price_usd") else "未計算",
+                    )
+                    _mg4.metric(
+                        "🟧 推奨SGD",
+                        f"S${pf['price_sgd']:,.2f}" if pf.get("price_sgd") else "未計算",
+                    )
+
+                    # 出品ボタン
+                    _bb1, _bb2 = st.columns(2)
+                    if _bb1.button(
+                        "🟦 eBay に出品する",
+                        use_container_width=True,
+                        type="primary",
+                        key="qs_ebay_btn",
+                    ):
+                        st.session_state["listing_target"] = (sel_id, "ebay")
+                        st.session_state["show_listing_modal"] = True
+                        st.rerun()
+                    if _bb2.button(
+                        "🟧 Shopee に出品する",
+                        use_container_width=True,
+                        type="secondary",
+                        key="qs_shopee_btn",
+                    ):
+                        st.session_state["listing_target"] = (sel_id, "shopee")
+                        st.session_state["show_listing_modal"] = True
+                        st.rerun()
 
     # 出品モーダル
     if st.session_state.get("show_listing_modal") and st.session_state.get("listing_target"):
