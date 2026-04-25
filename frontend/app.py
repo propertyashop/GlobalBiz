@@ -10,6 +10,7 @@ import os
 import time
 import json
 import importlib
+from typing import Optional
 import pandas as pd
 import streamlit as st
 from datetime import datetime
@@ -79,11 +80,33 @@ CATEGORY_LABELS = {
     ProductCategory.FOOD:        "🍱 食品・飲料",
     ProductCategory.COSMETICS:   "💄 化粧品・美容",
     ProductCategory.HEALTH:      "💊 健康・医療",
-    ProductCategory.SPORTS:      "⚽ スポーツ",
-    ProductCategory.HOME:        "🏠 家具・インテリア",
-    ProductCategory.BOOKS:       "📚 書籍・メディア",
-    ProductCategory.AUTO:        "🚗 自動車・バイク",
+    ProductCategory.SPORTS:      "⚽ スポーツ・アウトドア",
+    ProductCategory.HOME:        "🏠 ホーム・インテリア",
+    ProductCategory.BOOKS:       "📚 本・メディア",
+    ProductCategory.TOOLS:       "🔧 工具・DIY",
+    ProductCategory.HOBBY:       "🧸 ホビー・コレクション",
+    ProductCategory.PETS:        "🐾 ペット用品",
+    ProductCategory.AUTO:        "🚗 自動車・バイク用品",
     ProductCategory.OTHER:       "📦 その他",
+}
+
+# カテゴリ → 代表的な HS コード
+HS_CODE_DEFAULTS: dict = {
+    "electronics": "8518.30",
+    "clothing":    "6109.10",
+    "accessories": "7117.19",
+    "toys":        "9503.00",
+    "food":        "2106.90",
+    "cosmetics":   "3304.99",
+    "health":      "3004.90",
+    "sports":      "9506.99",
+    "home":        "9403.20",
+    "books":       "4901.99",
+    "tools":       "8467.29",
+    "hobby":       "9505.90",
+    "pets":        "9508.90",
+    "auto":        "8708.99",
+    "other":       "",
 }
 
 # 全国オプション（重複除去）
@@ -117,6 +140,9 @@ CATEGORY_PROFIT_KEYS = {
     "sports":      "PROFIT_RATE_SPORTS",
     "home":        "PROFIT_RATE_HOME",
     "books":       "PROFIT_RATE_BOOKS",
+    "tools":       "PROFIT_RATE_TOOLS",
+    "hobby":       "PROFIT_RATE_HOBBY",
+    "pets":        "PROFIT_RATE_PETS",
     "auto":        "PROFIT_RATE_AUTO",
     "other":       "PROFIT_RATE_OTHER",
 }
@@ -247,6 +273,38 @@ def calc_profit_for_product(product) -> dict:
             del _PROFIT_CACHE[oldest_key]
     return result
 
+def get_product_main_image(product) -> Optional[str]:
+    """商品のメイン画像URLを返す（image_urls[0] → image_url の順で優先）"""
+    imgs = product.image_urls
+    if imgs:
+        if isinstance(imgs, list) and imgs:
+            return imgs[0]
+        if isinstance(imgs, str):
+            try:
+                parsed = json.loads(imgs)
+                if parsed:
+                    return parsed[0]
+            except Exception:
+                return imgs
+    return product.image_url or None
+
+
+def get_product_all_images(product) -> list:
+    """商品の全画像URLリストを返す"""
+    imgs = product.image_urls
+    if imgs:
+        if isinstance(imgs, list):
+            return [u for u in imgs if u]
+        if isinstance(imgs, str):
+            try:
+                parsed = json.loads(imgs)
+                return [u for u in parsed if u]
+            except Exception:
+                return [imgs] if imgs else []
+    main = product.image_url
+    return [main] if main else []
+
+
 def products_to_df(products: list) -> pd.DataFrame:
     rows = []
     for p in products:
@@ -261,7 +319,9 @@ def products_to_df(products: list) -> pd.DataFrame:
             rate_str = f"🔴 {profit_rate*100:.1f}%"
         elif profit_rate < 0.10 and pf:
             rate_str = f"🟡 {profit_rate*100:.1f}%"
+        main_img = get_product_main_image(p)
         rows.append({
+            "画像":     main_img or "",
             "ID":       p.id,
             "SKU":      p.sku,
             "商品名":   p.name[:30] + ("…" if len(p.name) > 30 else ""),
@@ -456,7 +516,64 @@ if page == "📦 商品一覧":
         st.info("商品がありません。「➕ 商品登録」から追加してください。")
     else:
         df = products_to_df(products)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        # ── 画像サムネイル付きデータフレーム ──
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "画像": st.column_config.ImageColumn(
+                    "📷",
+                    help="商品画像（クリックで拡大）",
+                    width="small",
+                ),
+                "ID":     st.column_config.NumberColumn("ID", width="small"),
+                "SKU":    st.column_config.TextColumn("SKU", width="medium"),
+                "商品名": st.column_config.TextColumn("商品名", width="large"),
+                "仕入れ値": st.column_config.TextColumn("仕入れ値", width="small"),
+                "利益率": st.column_config.TextColumn("利益率", width="small"),
+                "利益額": st.column_config.TextColumn("利益額", width="small"),
+                "在庫":   st.column_config.NumberColumn("在庫", width="small"),
+            },
+            row_height=64,
+        )
+
+        # ── 画像拡大ビューア（選択商品のギャラリー）──
+        with st.expander("🔍 画像を拡大表示", expanded=False):
+            _view_options = {f"[{p.id}] {p.sku} — {p.name[:30]}": p for p in products}
+            _view_sel = st.selectbox(
+                "商品を選択",
+                list(_view_options.keys()),
+                key="list_img_viewer_sel",
+                label_visibility="collapsed",
+            )
+            _vp = _view_options.get(_view_sel)
+            if _vp:
+                _vp_imgs = get_product_all_images(_vp)
+                if _vp_imgs:
+                    # メイン画像
+                    _vi_main_col, _vi_sub_col = st.columns([2, 3])
+                    with _vi_main_col:
+                        st.caption("📌 メイン画像（1枚目）")
+                        try:
+                            st.image(_vp_imgs[0], use_container_width=True)
+                        except Exception:
+                            st.info("画像を表示できません")
+                    with _vi_sub_col:
+                        if len(_vp_imgs) > 1:
+                            st.caption(f"サブ画像（全 {len(_vp_imgs)} 枚）")
+                            _sub_grid = st.columns(min(len(_vp_imgs) - 1, 4))
+                            for _si, _surl in enumerate(_vp_imgs[1:8], 1):
+                                with _sub_grid[(_si - 1) % 4]:
+                                    try:
+                                        st.image(_surl, width=120)
+                                        _dom = "🇺🇸" if "amazon.com/" in _surl and ".co.jp" not in _surl else "🇯🇵" if "amazon" in _surl else "🌐"
+                                        st.caption(f"{_dom} {_si+1}")
+                                    except Exception:
+                                        st.caption(f"画像{_si+1}")
+                else:
+                    st.info("この商品には画像が登録されていません")
 
         # ── ページネーションコントロール ──
         pn_left, pn_center, pn_right = st.columns([1, 4, 1])
@@ -589,11 +706,27 @@ if page == "📦 商品一覧":
             sel_p = s.query(Product).filter(Product.id == sel_id).first()
             if sel_p:
                 pf = calc_profit_for_product(sel_p)
-                pc1, pc2, pc3, pc4 = st.columns(4)
-                pc1.info(f"**仕入れ値:** ¥{sel_p.cost_price:,.0f}")
-                pc2.info(f"**推奨USD:** {'${:,.2f}'.format(pf['price_usd']) if pf.get('price_usd') else '未計算'}")
-                pc3.info(f"**推奨SGD:** {'S${:,.2f}'.format(pf['price_sgd']) if pf.get('price_sgd') else '未計算'}")
-                pc4.info(f"**利益率:** {pf['profit_rate']*100:.1f}%" if pf.get("profit_rate") is not None else "**利益率:** —")
+                _qs_img = get_product_main_image(sel_p)
+                _qs_img_col, _qs_info_col = st.columns([1, 4])
+                with _qs_img_col:
+                    if _qs_img:
+                        try:
+                            st.image(_qs_img, use_container_width=True)
+                        except Exception:
+                            st.caption("📷")
+                    else:
+                        st.markdown(
+                            "<div style='width:80px;height:80px;background:#f0f0f0;"
+                            "display:flex;align-items:center;justify-content:center;"
+                            "border-radius:8px;font-size:1.5rem'>📷</div>",
+                            unsafe_allow_html=True,
+                        )
+                with _qs_info_col:
+                    pc1, pc2, pc3, pc4 = st.columns(4)
+                    pc1.info(f"**仕入れ値:** ¥{sel_p.cost_price:,.0f}")
+                    pc2.info(f"**推奨USD:** {'${:,.2f}'.format(pf['price_usd']) if pf.get('price_usd') else '未計算'}")
+                    pc3.info(f"**推奨SGD:** {'S${:,.2f}'.format(pf['price_sgd']) if pf.get('price_sgd') else '未計算'}")
+                    pc4.info(f"**利益率:** {pf['profit_rate']*100:.1f}%" if pf.get("profit_rate") is not None else "**利益率:** —")
 
         bc1, bc2 = st.columns(2)
         if bc1.button("🟦 eBay に出品", use_container_width=True):
@@ -613,14 +746,32 @@ if page == "📦 商品一覧":
             with get_session() as s:
                 p = s.query(Product).filter(Product.id == pid).first()
             if p:
-                st.write(f"**商品:** {p.name}")
-                pf = calc_profit_for_product(p)
-                if platform == "ebay":
-                    price_val = pf.get("price_usd") or round(float(p.cost_price) / 150 * 1.5, 2)
-                    price_input = st.number_input("販売価格 (USD)", value=round(float(price_val), 2), step=0.5)
-                else:
-                    price_val = pf.get("price_sgd") or round(float(p.cost_price) / 112 * 1.5, 2)
-                    price_input = st.number_input("販売価格 (SGD)", value=round(float(price_val), 2), step=0.5)
+                # 商品情報 + 画像プレビュー
+                _modal_img = get_product_main_image(p)
+                _modal_img_col, _modal_info_col = st.columns([1, 3])
+                with _modal_img_col:
+                    if _modal_img:
+                        try:
+                            st.image(_modal_img, use_container_width=True)
+                            st.caption(
+                                f"{'この画像でeBayに出品します' if platform == 'ebay' else 'この画像でShopeeに出品します'}"
+                            )
+                        except Exception:
+                            st.caption("画像を表示できません")
+                    else:
+                        st.info("📷 画像未登録")
+                with _modal_info_col:
+                    st.write(f"**商品:** {p.name}")
+                    _all_modal_imgs = get_product_all_images(p)
+                    if len(_all_modal_imgs) > 1:
+                        st.caption(f"📷 登録画像: {len(_all_modal_imgs)} 枚（全て出品に使用されます）")
+                    pf = calc_profit_for_product(p)
+                    if platform == "ebay":
+                        price_val = pf.get("price_usd") or round(float(p.cost_price) / 150 * 1.5, 2)
+                        price_input = st.number_input("販売価格 (USD)", value=round(float(price_val), 2), step=0.5)
+                    else:
+                        price_val = pf.get("price_sgd") or round(float(p.cost_price) / 112 * 1.5, 2)
+                        price_input = st.number_input("販売価格 (SGD)", value=round(float(price_val), 2), step=0.5)
 
                 mc1, mc2 = st.columns(2)
                 if mc1.button("✅ 出品する", type="primary"):
@@ -672,55 +823,114 @@ elif page == "➕ 商品登録":
     with left:
 
         # ── ASIN 自動取得パネル（フォーム外）──
-        with st.expander("🔍 ASIN から商品情報を自動取得（Amazon.co.jp）", expanded=False):
-            asin_fetch_col1, asin_fetch_col2 = st.columns([3, 1])
-            _asin_input = asin_fetch_col1.text_input(
+        with st.expander("🔍 ASIN から商品情報を自動取得", expanded=False):
+            _af_c1, _af_c2, _af_c3 = st.columns([3, 1, 1])
+            _asin_input = _af_c1.text_input(
                 "ASIN コード", placeholder="B0BDHWDR12",
                 key="asin_fetch_input", label_visibility="visible",
             )
-            if asin_fetch_col2.button("📥 ASINから取得", type="primary", use_container_width=True):
+            # 画像取得リージョン選択
+            _img_region = _af_c2.radio(
+                "画像取得元",
+                ["🇺🇸 US（英語）", "🇯🇵 JP（日本語）", "🌐 両方"],
+                index=0,
+                key="asin_img_region",
+                help="US画像は英語パッケージ。JP画像は日本語パッケージ。両方取得して選べます。",
+            )
+            _region_map = {
+                "🇺🇸 US（英語）": "us",
+                "🇯🇵 JP（日本語）": "jp",
+                "🌐 両方": "both",
+            }
+            _selected_region = _region_map.get(_img_region, "both")
+
+            if _af_c3.button("📥 ASINから取得", type="primary", use_container_width=True):
                 if not _asin_input:
                     st.warning("ASIN を入力してください")
                 else:
-                    with st.spinner(f"Amazon.co.jp から ASIN {_asin_input} を取得中..."):
+                    _spinner_msg = {
+                        "us":   "Amazon.com（US）から取得中...",
+                        "jp":   "Amazon.co.jp（JP）から取得中...",
+                        "both": "Amazon.co.jp + Amazon.com から並列取得中...",
+                    }.get(_selected_region, "取得中...")
+                    with st.spinner(f"ASIN {_asin_input.strip().upper()} — {_spinner_msg}"):
                         try:
                             from backend.scrapers.amazon import fetch_product_by_asin
-                            _result = fetch_product_by_asin(_asin_input.strip().upper())
+                            _result = fetch_product_by_asin(
+                                _asin_input.strip().upper(),
+                                region=_selected_region,
+                            )
                         except Exception as _e:
                             _result = {"error": str(_e)}
 
-                    if _result.get("error"):
+                    if _result.get("error") and not _result.get("name"):
                         st.error(f"❌ {_result['error']}")
                     else:
                         st.session_state["asin_prefill"] = _result
-                        st.success(f"✅ 取得完了: {_result['name'][:50]}")
+                        _name_disp = _result.get("name", "") or _result.get("name_en", "")
+                        st.success(f"✅ 取得完了: {_name_disp[:50]}")
                         if _result.get("price"):
-                            st.info(f"💴 Amazon 現在価格: ¥{_result['price']:,.0f}")
-                        if _result.get("images"):
-                            img_preview = st.columns(min(len(_result["images"]), 4))
-                            for _i, _img_col in enumerate(img_preview):
-                                if _i < len(_result["images"]):
-                                    _img_col.image(_result["images"][_i], width=80)
-                        st.caption(f"カテゴリ: {_result['category']} / 在庫: {_result['availability']}"
-                                   + (f" / JAN: {_result['jan_code']}" if _result.get("jan_code") else "")
-                                   + (f" / 重量: {_result['weight_g']:.0f}g" if _result.get("weight_g") else ""))
-                        st.caption("⬇️ 下のフォームに自動入力されます（登録ボタンで確定）")
+                            st.info(f"💴 Amazon JP 価格: ¥{_result['price']:,.0f}")
+                        if _result.get("name_en") and _result["name_en"] != _result.get("name",""):
+                            st.info(f"🇺🇸 英語名: {_result['name_en'][:60]}")
+                        if _result.get("error_us"):
+                            st.warning(f"⚠️ US画像取得: {_result['error_us'][:60]}")
+
+                        # 画像プレビュー（JP と US 並べて表示）
+                        _imgs_jp = _result.get("images_jp", [])
+                        _imgs_us = _result.get("images_us", [])
+                        if _imgs_us and _imgs_jp:
+                            _pv_c1, _pv_c2 = st.columns(2)
+                            with _pv_c1:
+                                st.caption(f"🇯🇵 JP画像 ({len(_imgs_jp)}枚)")
+                                _jp_cols = st.columns(min(len(_imgs_jp), 4))
+                                for _ii, _iu in enumerate(_imgs_jp[:4]):
+                                    try: _jp_cols[_ii].image(_iu, width=75)
+                                    except Exception: pass
+                            with _pv_c2:
+                                st.caption(f"🇺🇸 US画像 ({len(_imgs_us)}枚)")
+                                _us_cols = st.columns(min(len(_imgs_us), 4))
+                                for _ii, _iu in enumerate(_imgs_us[:4]):
+                                    try: _us_cols[_ii].image(_iu, width=75)
+                                    except Exception: pass
+                        elif _result.get("images"):
+                            _pv_cols = st.columns(min(len(_result["images"]), 4))
+                            for _ii, _iu in enumerate(_result["images"][:4]):
+                                try: _pv_cols[_ii].image(_iu, width=80)
+                                except Exception: pass
+
+                        st.caption(
+                            f"カテゴリ: {_result.get('category','—')} / 在庫: {_result.get('availability','—')}"
+                            + (f" / JAN: {_result['jan_code']}" if _result.get("jan_code") else "")
+                            + (f" / 重量: {_result['weight_g']:.0f}g" if _result.get("weight_g") else "")
+                        )
+                        st.caption("⬇️ 下のパネルに自動入力されます（登録ボタンで確定）")
 
             # プリフィルデータの確認表示
             if st.session_state.get("asin_prefill"):
                 pf_data = st.session_state["asin_prefill"]
-                st.info(f"📋 取得済み: **{pf_data.get('name','')[:60]}**  "
-                        f"| 画像 {len(pf_data.get('images',[]))} 枚")
+                _n = pf_data.get("name", "") or pf_data.get("name_en", "")
+                _imgs_jp_n = len(pf_data.get("images_jp", []))
+                _imgs_us_n = len(pf_data.get("images_us", []))
+                _img_info = (
+                    f"JP:{_imgs_jp_n}枚 / US:{_imgs_us_n}枚"
+                    if (_imgs_jp_n or _imgs_us_n)
+                    else f"画像 {len(pf_data.get('images',[]))} 枚"
+                )
+                st.info(f"📋 取得済み: **{_n[:60]}**  |  {_img_info}")
                 if st.button("🗑️ 取得データをクリア", key="clear_prefill"):
-                    st.session_state["asin_prefill"] = None
+                    for _k in ["asin_prefill", "reg_images"]:
+                        st.session_state.pop(_k, None)
                     st.rerun()
 
         # プリフィルデータを読み込む
         _pf = st.session_state.get("asin_prefill") or {}
 
-        # ASIN 取得後、画像を自動でセッションに取り込む
-        if _pf.get("images") and "reg_images" not in st.session_state:
-            st.session_state["reg_images"] = list(_pf["images"])
+        # ASIN 取得後、画像を自動でセッションに取り込む（US優先）
+        if _pf and "reg_images" not in st.session_state:
+            _auto_imgs = _pf.get("images_us") or _pf.get("images_jp") or _pf.get("images") or []
+            if _auto_imgs:
+                st.session_state["reg_images"] = list(_auto_imgs)
 
         # ══════════════════════════════════════════════════════
         #  🌐 翻訳・AI コンテンツ生成パネル（フォーム外）
@@ -808,19 +1018,34 @@ elif page == "➕ 商品登録":
                 st.caption(f"繁体字訳: {st.session_state['reg_desc_zh'][:80]}…")
 
             st.divider()
-            st.markdown("**✨ AI英語コンテンツ自動生成（Claude API）**")
-            _ai_cat = _pf.get("category", "other")
+            st.markdown("**✨ eBay/Shopee 用英語コンテンツ自動生成**")
+            _ai_cat = st.session_state.get("reg_category_select",
+                                           _pf.get("category", "other"))
             _ai_configured = bool(get_env("ANTHROPIC_API_KEY"))
-            if not _ai_configured:
-                st.info("💡 Anthropic APIキーを設定画面で入力するとAI生成が使えます")
+
+            # APIキーの有無を表示
+            if _ai_configured:
+                st.caption("🤖 Claude AI モード（高品質生成）")
+            else:
+                st.caption("📋 テンプレートモード（APIキーなしでも利用可）  "
+                           "— Anthropic APIキーを設定画面で入力するとAI生成に切り替わります")
+
+            _gen_btn_label = (
+                "✨ Claude AIで英語コンテンツを生成" if _ai_configured
+                else "📋 テンプレートで英語コンテンツを生成"
+            )
             if st.button(
-                "✨ eBay/Shopee用英語コンテンツを生成",
+                _gen_btn_label,
                 key="btn_ai_generate",
                 type="primary",
                 disabled=not bool(_trans_name_jp),
                 use_container_width=True,
             ):
-                with st.spinner("Claude API で生成中...（10〜20秒）"):
+                _spinner_msg = (
+                    "Claude AI で生成中...（10〜20秒）" if _ai_configured
+                    else "テンプレート＋翻訳で生成中..."
+                )
+                with st.spinner(_spinner_msg):
                     from backend.ai.content_gen import generate_listing_content
                     _ai_result = generate_listing_content(
                         product_name_ja=_trans_name_jp,
@@ -828,90 +1053,259 @@ elif page == "➕ 商品登録":
                         category=_ai_cat,
                         product_name_en=st.session_state.get("reg_name_en", ""),
                     )
-                if _ai_result.get("error"):
+                if _ai_result.get("error") and not _ai_result.get("ebay_title"):
                     st.error(f"❌ {_ai_result['error']}")
                 else:
                     st.session_state["ai_content"] = _ai_result
-                    st.success("✅ AI生成完了")
+                    _src = _ai_result.get("source", "template")
+                    st.success(
+                        f"✅ 生成完了（{'Claude AI' if _src == 'claude' else 'テンプレート'}）"
+                    )
                     st.rerun()
 
             if st.session_state.get("ai_content"):
                 _ai = st.session_state["ai_content"]
+                _src_badge = (
+                    "🤖 Claude AI生成" if _ai.get("source") == "claude"
+                    else "📋 テンプレート生成"
+                )
+
+                # ── タイトル ──
                 with st.container(border=True):
-                    st.markdown(f"**eBay タイトル（{len(_ai.get('ebay_title',''))}文字）:**  \n{_ai.get('ebay_title','')}")
-                    st.markdown(f"**Shopee タイトル（{len(_ai.get('shopee_title',''))}文字）:**  \n{_ai.get('shopee_title','')}")
-                    if _ai.get("features"):
-                        st.markdown("**特徴:**")
-                        for _feat in _ai["features"]:
-                            st.markdown(f"✓ {_feat}")
-                    _ai_apply_c1, _ai_apply_c2 = st.columns(2)
-                    if _ai_apply_c1.button("⬇️ 英語フォームに適用", key="apply_ai_en", use_container_width=True):
+                    st.caption(_src_badge)
+                    _tc1, _tc2 = st.columns([4, 1])
+                    _tc1.markdown(
+                        f"**🟦 eBay タイトル（{len(_ai.get('ebay_title',''))}文字）**"
+                    )
+                    _tc1.code(_ai.get("ebay_title", ""), language=None)
+                    _tc2.markdown("<br>", unsafe_allow_html=True)
+                    if _tc2.button("📋", key="copy_ebay_title", help="eBayタイトルを英語名欄に適用"):
                         st.session_state["reg_name_en"] = _ai.get("ebay_title", "")
-                        st.session_state["reg_desc_en"] = _ai.get("description_plain", "")
-                        st.success("✅ 適用しました")
+                        st.success("eBayタイトルを英語名欄に適用しました")
                         st.rerun()
-                    if _ai_apply_c2.button("🗑️ AI結果をクリア", key="clear_ai", use_container_width=True):
-                        st.session_state["ai_content"] = None
-                        st.rerun()
+
+                    _sc1, _sc2 = st.columns([4, 1])
+                    _sc1.markdown(
+                        f"**🟧 Shopee タイトル（{len(_ai.get('shopee_title',''))}文字）**"
+                    )
+                    _sc1.code(_ai.get("shopee_title", ""), language=None)
+
+                # ── 特徴リスト ──
+                if _ai.get("features"):
+                    with st.container(border=True):
+                        st.markdown("**✅ 特徴リスト（eBay Item Specifics用）**")
+                        for _i, _feat in enumerate(_ai["features"], 1):
+                            st.markdown(f"{_i}. {_feat}")
+
+                # ── 説明文プレビュー（タブ切り替え）──
+                if _ai.get("description_html") or _ai.get("description_plain"):
+                    st.markdown("**📄 説明文プレビュー**")
+                    _prev_tab1, _prev_tab2 = st.tabs(
+                        ["🟦 eBay（HTML）", "🟧 Shopee（テキスト）"]
+                    )
+                    with _prev_tab1:
+                        if _ai.get("description_html"):
+                            st.markdown(
+                                _ai["description_html"],
+                                unsafe_allow_html=True,
+                            )
+                            st.markdown("---")
+                            st.caption("▼ HTMLソース（コピーして eBay に貼り付け）")
+                            st.text_area(
+                                "eBay HTML説明文",
+                                value=_ai["description_html"],
+                                height=150,
+                                key="preview_ebay_html",
+                                label_visibility="collapsed",
+                            )
+                            if st.button("⬇️ eBay説明文をフォームに適用",
+                                         key="apply_ebay_desc", use_container_width=True):
+                                st.session_state["reg_desc_en"] = _ai["description_html"]
+                                st.success("✅ eBay説明文を適用しました")
+                                st.rerun()
+                    with _prev_tab2:
+                        if _ai.get("description_plain"):
+                            st.markdown(
+                                "```\n" + _ai["description_plain"] + "\n```"
+                            )
+                            if st.button("⬇️ Shopee説明文をフォームに適用",
+                                         key="apply_shopee_desc", use_container_width=True):
+                                st.session_state["reg_desc_en"] = _ai["description_plain"]
+                                st.success("✅ Shopee説明文を適用しました")
+                                st.rerun()
+
+                # ── 一括適用 / クリア ──
+                _ai_btn_c1, _ai_btn_c2 = st.columns(2)
+                if _ai_btn_c1.button(
+                    "⬇️ タイトル＋説明文を一括適用",
+                    key="apply_ai_en", use_container_width=True, type="primary",
+                ):
+                    st.session_state["reg_name_en"] = _ai.get("ebay_title", "")
+                    st.session_state["reg_desc_en"] = _ai.get("description_plain", "")
+                    st.success("✅ 英語タイトル・説明文をフォームに適用しました")
+                    st.rerun()
+                if _ai_btn_c2.button(
+                    "🗑️ AI結果をクリア",
+                    key="clear_ai", use_container_width=True,
+                ):
+                    st.session_state["ai_content"] = None
+                    st.rerun()
 
         # ══════════════════════════════════════════════════════
         #  🖼️ 画像管理パネル（フォーム外）
         # ══════════════════════════════════════════════════════
-        _asin_imgs = _pf.get("images", []) or []
+        _imgs_jp  = _pf.get("images_jp", []) or []
+        _imgs_us  = _pf.get("images_us", []) or []
+        _asin_imgs = _pf.get("images", []) or []   # 後方互換（both 未対応時）
+        _has_dual  = bool(_imgs_jp) or bool(_imgs_us)
+
+        _confirmed_count = len(st.session_state.get("reg_images", _asin_imgs))
         with st.expander(
-            f"🖼️ 画像管理（{len(st.session_state.get('reg_images', _asin_imgs))} 枚選択中）",
-            expanded=bool(_asin_imgs),
+            f"🖼️ 画像管理（{_confirmed_count} 枚選択中）",
+            expanded=_has_dual or bool(_asin_imgs),
         ):
-            if _asin_imgs:
-                st.caption("ASINから取得した画像（チェックした画像のみ使用）")
-                _selected: list = []
+            # ─ JP/US タブ切り替え ─
+            if _has_dual:
+                st.caption(
+                    f"🇯🇵 JP画像 {len(_imgs_jp)}枚  /  🇺🇸 US画像 {len(_imgs_us)}枚  "
+                    "— チェックした画像を選択。1枚目がメイン画像。"
+                )
+                _itab_us, _itab_jp, _itab_all = st.tabs(
+                    [f"🇺🇸 US画像 ({len(_imgs_us)}枚)",
+                     f"🇯🇵 JP画像 ({len(_imgs_jp)}枚)",
+                     "📋 選択済みまとめ"]
+                )
+
+                def _render_img_tab(tab, imgs: list, key_prefix: str) -> list:
+                    sel = []
+                    if not imgs:
+                        tab.info("画像が取得されていません")
+                        return sel
+                    _tab_cols = tab.columns(min(len(imgs), 3))
+                    for _ii, _url in enumerate(imgs):
+                        with _tab_cols[_ii % 3]:
+                            try:
+                                st.image(_url, use_container_width=True)
+                            except Exception:
+                                st.caption(f"画像{_ii+1}")
+                            if st.checkbox(
+                                f"{'📌 メイン' if _ii == 0 else f'{_ii+1}枚目'}",
+                                value=True,
+                                key=f"{key_prefix}_{_ii}",
+                            ):
+                                sel.append(_url)
+                    return sel
+
+                _sel_us = _render_img_tab(_itab_us, _imgs_us, "chk_us")
+                _sel_jp = _render_img_tab(_itab_jp, _imgs_jp, "chk_jp")
+                # US優先でマージ（重複除去）
+                _selected_dual = _sel_us + [u for u in _sel_jp if u not in _sel_us]
+
+                with _itab_all:
+                    if _selected_dual:
+                        st.caption(f"現在の選択: {len(_selected_dual)} 枚")
+                        _all_cols = st.columns(min(len(_selected_dual), 3))
+                        for _ai2, _au in enumerate(_selected_dual):
+                            with _all_cols[_ai2 % 3]:
+                                try:
+                                    st.image(_au, use_container_width=True)
+                                    _dom = "🇺🇸" if _au in _imgs_us else "🇯🇵"
+                                    st.caption(f"{_dom} {'📌' if _ai2==0 else f'{_ai2+1}枚目'}")
+                                except Exception:
+                                    st.caption(f"{_ai2+1}枚目")
+                    else:
+                        st.info("画像が選択されていません")
+
+            elif _asin_imgs:
+                st.caption("取得済み画像（チェックした画像のみ使用）")
+                _selected_dual = []
                 _asin_img_cols = st.columns(min(len(_asin_imgs), 3))
                 for _ii, _img_url in enumerate(_asin_imgs):
-                    _col = _asin_img_cols[_ii % 3]
-                    with _col:
+                    with _asin_img_cols[_ii % 3]:
                         try:
-                            st.image(_img_url, width=100)
+                            st.image(_img_url, use_container_width=True)
                         except Exception:
                             st.caption("(プレビュー不可)")
-                        _checked = st.checkbox(
-                            f"画像 {_ii+1}",
+                        if st.checkbox(
+                            f"{'📌 メイン' if _ii == 0 else f'{_ii+1}枚目'}",
                             value=True,
                             key=f"img_chk_{_ii}",
-                        )
-                        if _checked:
-                            _selected.append(_img_url)
-                # 手動追加 URL
-                _manual_urls_raw = st.text_area(
-                    "追加画像URL（1行1URL、最大9枚まで）",
-                    value="\n".join(
-                        u for u in st.session_state.get("reg_images", [])
-                        if u not in _asin_imgs
-                    ),
-                    height=60,
-                    key="manual_img_urls",
-                )
-                _manual_urls = [u.strip() for u in _manual_urls_raw.strip().split("\n") if u.strip()]
-                _all_imgs = (_selected + _manual_urls)[:9]
-                if st.button("✅ この画像リストで確定", key="confirm_images", use_container_width=True):
-                    st.session_state["reg_images"] = _all_imgs
-                    st.success(f"✅ {len(_all_imgs)} 枚確定しました（1枚目がメイン画像）")
+                        ):
+                            _selected_dual.append(_img_url)
             else:
-                st.caption("ASINを取得すると画像が自動表示されます。手動でURLを入力することもできます。")
-                _manual_urls_raw2 = st.text_area(
-                    "画像URL（1行1URL、最大9枚）",
-                    value="\n".join(st.session_state.get("reg_images", [])),
-                    height=120,
-                    key="manual_img_urls2",
-                )
-                _manual_list = [u.strip() for u in _manual_urls_raw2.strip().split("\n") if u.strip()][:9]
-                if st.button("✅ 画像リストを確定", key="confirm_images2", use_container_width=True):
-                    st.session_state["reg_images"] = _manual_list
-                    st.success(f"✅ {len(_manual_list)} 枚確定しました")
+                _selected_dual = []
 
-            # 現在確定している画像
+            # 手動追加 URL
+            _existing_manual = [
+                u for u in st.session_state.get("reg_images", [])
+                if u not in _imgs_jp and u not in _imgs_us and u not in _asin_imgs
+            ]
+            _manual_urls_raw = st.text_area(
+                "追加画像URL（1行1URL、最大9枚）",
+                value="\n".join(_existing_manual),
+                height=60,
+                key="manual_img_urls",
+                placeholder="https://... （手動追加、ASINで取得できない画像用）",
+            )
+            _manual_urls = [u.strip() for u in _manual_urls_raw.strip().split("\n") if u.strip()]
+            _all_imgs_final = (_selected_dual + _manual_urls)[:9]
+
+            # 右側プレビュー + 確定ボタン
+            _ic1, _ic2 = st.columns(2)
+            if _ic1.button("✅ この画像リストで確定", key="confirm_images", use_container_width=True):
+                st.session_state["reg_images"] = _all_imgs_final
+                st.success(f"✅ {len(_all_imgs_final)} 枚確定（1枚目がメイン画像）")
+            if _ic2.button("🗑️ 選択をリセット", key="reset_images", use_container_width=True):
+                st.session_state.pop("reg_images", None)
+                st.rerun()
+
+            # 現在確定している画像のプレビュー
             _confirmed_imgs = st.session_state.get("reg_images", [])
             if _confirmed_imgs:
-                st.caption(f"確定済み画像: {len(_confirmed_imgs)} 枚  |  1枚目: {_confirmed_imgs[0][:50]}…")
+                st.caption(f"✅ 確定済み: {len(_confirmed_imgs)} 枚")
+                _conf_cols = st.columns(min(len(_confirmed_imgs), 3))
+                for _ci, _cu in enumerate(_confirmed_imgs):
+                    with _conf_cols[_ci % 3]:
+                        try:
+                            st.image(_cu, use_container_width=True)
+                            st.caption(f"{'📌 メイン' if _ci == 0 else f'{_ci+1}枚目'}")
+                        except Exception:
+                            st.caption(f"{_ci+1}枚目")
+
+        # ══════════════════════════════════════════════════════
+        #  🏷️ カテゴリ・利益率 （フォーム外 → リアルタイム更新）
+        # ══════════════════════════════════════════════════════
+        with st.container(border=True):
+            _cat_label = "🏷️ カテゴリ・利益率"
+            st.markdown(f"**{_cat_label}**")
+            _cat_all = [c.value for c in ProductCategory]
+            _cat_from_asin = _pf.get("category", "other")
+            _cat_persisted = st.session_state.get("reg_category_select", _cat_from_asin)
+            # ASINから新しいデータが来たら反映
+            if _pf and _cat_from_asin != "other":
+                _cat_persisted = _cat_from_asin
+            _cat_idx = _cat_all.index(_cat_persisted) if _cat_persisted in _cat_all else 0
+            category_val = st.selectbox(
+                "商品カテゴリ *",
+                _cat_all,
+                index=_cat_idx,
+                format_func=lambda v: CATEGORY_LABELS.get(ProductCategory(v), v),
+                key="reg_category_select",
+                help="カテゴリを変えると利益率・HSコードが自動更新されます",
+            )
+            # HSコード自動補完
+            _auto_hs = HS_CODE_DEFAULTS.get(category_val, "")
+            # 利益率スライダー（カテゴリ変更でリアルタイム更新）
+            _cat_rate = get_profit_rate(category_val)
+            _rate_col1, _rate_col2 = st.columns([3, 1])
+            profit_rate_override = _rate_col1.slider(
+                f"個別利益率（{CATEGORY_LABELS.get(ProductCategory(category_val), category_val)} 既定: {_cat_rate*100:.0f}%）",
+                0, 60,
+                int(_cat_rate * 100), step=5, format="%d%%",
+                key="reg_profit_slider",
+                help="0% = カテゴリ設定を使用。個別に上書きする場合はここで指定。",
+            ) / 100
+            _rate_col2.metric("適用利益率", f"{(profit_rate_override or _cat_rate)*100:.0f}%")
 
         with st.form("product_form", clear_on_submit=True):
 
@@ -953,21 +1347,7 @@ elif page == "➕ 商品登録":
                                         placeholder="4901234567890", max_chars=13)
             upc_val = id_c2.text_input("UPCコード（任意）", placeholder="012345678901", max_chars=12)
 
-            st.subheader("🏷️ カテゴリ・詳細")
-            cat_c1, cat_c2 = st.columns(2)
-            # ASIN から取得したカテゴリをデフォルトに
-            _cat_default_list = [c.value for c in ProductCategory]
-            _cat_from_asin = _pf.get("category", "other")
-            _cat_idx = _cat_default_list.index(_cat_from_asin) if _cat_from_asin in _cat_default_list else 0
-            category_val = cat_c1.selectbox(
-                "商品カテゴリ *",
-                _cat_default_list,
-                index=_cat_idx,
-                format_func=lambda v: CATEGORY_LABELS.get(ProductCategory(v), v),
-            )
-            hs_code_val = cat_c2.text_input("HSコード", placeholder="8518.30")
-
-            st.subheader("📐 重量・サイズ")
+            st.subheader("📐 重量・サイズ・HSコード")
             w_c1, w_c2, w_c3, w_c4 = st.columns(4)
             _weight_default = _pf.get("weight_g") or 0.0
             weight_g_val = w_c1.number_input("重量 (g)", min_value=0.0, step=10.0,
@@ -975,6 +1355,12 @@ elif page == "➕ 商品登録":
             size_l_val = w_c2.number_input("縦 (cm)", min_value=0.0, step=1.0, value=0.0)
             size_w_val = w_c3.number_input("横 (cm)", min_value=0.0, step=1.0, value=0.0)
             size_h_val = w_c4.number_input("高さ (cm)", min_value=0.0, step=1.0, value=0.0)
+            hs_code_val = st.text_input(
+                "HSコード（関税分類番号）",
+                value=_auto_hs,
+                placeholder="カテゴリから自動入力 / 手動で上書き可",
+                help="カテゴリに応じて自動補完されます。変更可能。",
+            )
 
             st.subheader("💴 価格・在庫・利益率")
             p_c1, p_c2 = st.columns(2)
@@ -982,15 +1368,6 @@ elif page == "➕ 商品登録":
             cost_price_val    = p_c1.number_input("仕入れ値（円）*", min_value=0.0, step=100.0,
                                                    value=float(_price_default))
             current_stock_val = p_c2.number_input("在庫数", min_value=0, step=1)
-
-            # 利益率（商品個別上書き）
-            _cat_default_rate = get_profit_rate(category_val)
-            _profit_label = f"個別利益率（カテゴリ既定: {_cat_default_rate*100:.0f}%）"
-            profit_rate_override = st.slider(
-                _profit_label, 0, 60,
-                int(_cat_default_rate * 100), step=5, format="%d%%",
-                help="0% = カテゴリ設定を使用。個別に上書きする場合はここで指定。",
-            ) / 100
 
             st.subheader("🌍 販売先")
             mp_c1, mp_c2 = st.columns(2)
@@ -2017,8 +2394,43 @@ elif page == "✏️ 商品編集":
 
     st.caption(f"登録日: {ep.created_at}  |  最終更新: {ep.updated_at}")
 
+    # ── 商品画像ギャラリー ──
+    _edit_imgs = get_product_all_images(ep)
+    if _edit_imgs:
+        with st.expander(f"🖼️ 商品画像ギャラリー（{len(_edit_imgs)} 枚）", expanded=True):
+            if len(_edit_imgs) == 1:
+                try:
+                    st.image(_edit_imgs[0], width=300)
+                except Exception:
+                    st.caption(_edit_imgs[0][:80])
+            else:
+                _gal_main, _gal_subs = st.columns([2, 3])
+                with _gal_main:
+                    st.caption("📌 メイン画像")
+                    try:
+                        st.image(_edit_imgs[0], use_container_width=True)
+                    except Exception:
+                        st.caption(_edit_imgs[0][:80])
+                with _gal_subs:
+                    st.caption(f"サブ画像（全 {len(_edit_imgs)} 枚）")
+                    _sub_cols = st.columns(min(len(_edit_imgs) - 1, 3))
+                    for _gi, _gurl in enumerate(_edit_imgs[1:9], 1):
+                        with _sub_cols[(_gi - 1) % 3]:
+                            try:
+                                st.image(_gurl, use_container_width=True)
+                            except Exception:
+                                pass
+                            _g_dom = (
+                                "🇺🇸 US" if "amazon.com/" in _gurl and ".co.jp" not in _gurl
+                                else "🇯🇵 JP" if "amazon" in _gurl
+                                else "🌐"
+                            )
+                            st.caption(f"{_g_dom}  {_gi + 1}枚目")
+    else:
+        st.caption("📷 画像未登録（商品登録画面でASINから取得できます）")
+
     # ── タブ: 基本情報 / 価格・在庫 / 出品設定 / 危険操作 ──
-    et1, et2, et3, et4 = st.tabs(["📋 基本情報", "💴 価格・在庫", "🌍 出品設定", "⚠️ 危険操作"])
+    et1, et2, et3, et4, et5 = st.tabs(["📋 基本情報", "💴 価格・在庫", "🌍 出品設定", "🖼️ 画像管理", "⚠️ 危険操作"])
 
     # ─── 基本情報 ───
     with et1:
@@ -2220,8 +2632,83 @@ elif page == "✏️ 商品編集":
                 st.success("✅ 出品設定を保存しました")
                 st.rerun()
 
-    # ─── 危険操作 ───
+    # ─── 画像管理 ───
     with et4:
+        st.subheader("🖼️ 商品画像の管理")
+        _cur_imgs = get_product_all_images(ep)
+
+        # 現在の画像グリッド表示
+        if _cur_imgs:
+            st.caption(f"現在登録中: {len(_cur_imgs)} 枚  |  1枚目がメイン画像")
+            _img_mgmt_cols = st.columns(min(len(_cur_imgs), 3))
+            for _mi, _murl in enumerate(_cur_imgs):
+                with _img_mgmt_cols[_mi % 3]:
+                    try:
+                        st.image(_murl, use_container_width=True)
+                    except Exception:
+                        st.caption("(表示不可)")
+                    _m_dom = (
+                        "🇺🇸 US" if "amazon.com/" in _murl and ".co.jp" not in _murl
+                        else "🇯🇵 JP" if "amazon" in _murl
+                        else "🌐"
+                    )
+                    st.caption(f"{_m_dom}  {'📌 メイン' if _mi == 0 else f'{_mi+1}枚目'}")
+        else:
+            st.info("画像が登録されていません")
+
+        st.divider()
+
+        # 画像URLリスト編集
+        with st.form("edit_images_form"):
+            st.markdown("**画像URLを編集（1行1URL、最大9枚、1枚目がメイン画像）**")
+            _cur_txt = "\n".join(_cur_imgs)
+            new_img_txt = st.text_area(
+                "画像URLリスト",
+                value=_cur_txt,
+                height=200,
+                key="edit_img_urls",
+                help="URLを1行に1つ入力。順番が表示順になります。",
+            )
+            # JP/USプレビュー
+            _new_img_list = [u.strip() for u in new_img_txt.strip().split("\n") if u.strip()][:9]
+            st.caption(f"入力中: {len(_new_img_list)} 枚")
+
+            _ei_c1, _ei_c2 = st.columns(2)
+            if _ei_c1.form_submit_button("💾 画像リストを保存", type="primary", use_container_width=True):
+                with get_session() as s:
+                    _ep2 = s.query(Product).filter(Product.id == edit_id).first()
+                    _ep2.image_urls = _new_img_list if _new_img_list else None
+                    _ep2.image_url  = _new_img_list[0] if _new_img_list else None
+                    _ep2.updated_at = datetime.utcnow()
+                    s.commit()
+                st.success(f"✅ 画像 {len(_new_img_list)} 枚を保存しました")
+                st.rerun()
+            if _ei_c2.form_submit_button("🗑️ 画像をすべて削除", use_container_width=True):
+                with get_session() as s:
+                    _ep2 = s.query(Product).filter(Product.id == edit_id).first()
+                    _ep2.image_urls = None
+                    _ep2.image_url  = None
+                    _ep2.updated_at = datetime.utcnow()
+                    s.commit()
+                st.success("✅ 画像をすべて削除しました")
+                st.rerun()
+
+        # 入力中プレビュー（フォーム外）
+        if _new_img_list if 'new_img_txt' in dir() else _cur_imgs:
+            _preview_list = [u.strip() for u in st.session_state.get("edit_img_urls", "").split("\n") if u.strip()][:9] or _cur_imgs
+            if _preview_list:
+                with st.expander("🔍 入力中の画像プレビュー", expanded=False):
+                    _prv_c = st.columns(min(len(_preview_list), 3))
+                    for _pi, _pu in enumerate(_preview_list):
+                        with _prv_c[_pi % 3]:
+                            try:
+                                st.image(_pu, use_container_width=True)
+                                st.caption(f"{'📌 メイン' if _pi == 0 else f'{_pi+1}枚目'}")
+                            except Exception:
+                                st.caption(f"画像{_pi+1}: 表示不可")
+
+    # ─── 危険操作 ───
+    with et5:
         st.warning("⚠️ この操作は取り消せません")
 
         # eBay 出品停止

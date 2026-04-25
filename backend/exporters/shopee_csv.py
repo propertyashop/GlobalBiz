@@ -126,6 +126,9 @@ CATEGORY_DEFAULT_MAP: Dict[str, int] = {
     "sports":      100563,
     "home":        100542,
     "books":       100652,
+    "tools":       100599,   # Tools → Others（SGP/MYS共通）
+    "hobby":       100599,   # Hobby → Others
+    "pets":        100599,   # Pets → Others
     "auto":        100657,
     "other":       100599,
 }
@@ -186,6 +189,9 @@ TW_CATEGORY_DEFAULT_MAP: Dict[str, int] = {
     "sports":      11000070,
     "home":        11000050,
     "books":       11000099,
+    "tools":       11000099,   # Tools → 其他
+    "hobby":       11000099,   # Hobby → 其他
+    "pets":        11000099,   # Pets → 其他
     "auto":        11000090,
     "other":       11000099,
 }

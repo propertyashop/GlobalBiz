@@ -314,72 +314,67 @@ def _extract_asin_from_page(soup: BeautifulSoup) -> Optional[str]:
     return None
 
 
-# ── メイン関数 ─────────────────────────────────────────────────────
+# ── ドメイン設定 ──────────────────────────────────────────────────
+_REGION_CONFIG: Dict[str, Dict[str, str]] = {
+    "jp": {
+        "domain":    "amazon.co.jp",
+        "lang":      "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
+        "label":     "🇯🇵 JP",
+    },
+    "us": {
+        "domain":    "amazon.com",
+        "lang":      "en-US,en;q=0.9",
+        "label":     "🇺🇸 US",
+    },
+}
 
-def fetch_product_by_asin(asin: str, rate_limit: bool = True) -> Dict[str, Any]:
-    """
-    Amazon.co.jp の商品ページから商品情報を取得する。
 
-    Args:
-        asin: Amazon ASIN コード（例: B0BDHWDR12）
-        rate_limit: True の場合 1〜3 秒の待機を行う
+def _get_headers_for_region(region: str = "jp") -> Dict[str, str]:
+    cfg = _REGION_CONFIG.get(region, _REGION_CONFIG["jp"])
+    return {
+        "User-Agent": random.choice(_USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                  "image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": cfg["lang"],
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Cache-Control": "max-age=0",
+    }
 
-    Returns:
-        {
-            "asin": str,
-            "name": str,           # 商品名（日本語）
-            "name_en": str,        # 英語名（取得できた場合）
-            "price": float|None,   # 価格（円）
-            "images": [str],       # 画像 URL リスト（最大9）
-            "category": str,       # 内部カテゴリ値
-            "availability": str,   # 在庫状況テキスト
-            "jan_code": str|None,  # JAN コード
-            "weight_g": float|None,# 重量（g）
-            "url": str,            # 商品ページ URL
-            "error": str|None,     # エラーメッセージ（成功時 None）
-        }
-    """
-    asin = asin.strip().upper()
 
-    # ASIN 形式チェック
-    if not re.match(r"^B[A-Z0-9]{9}$", asin):
-        return {
-            "asin": asin, "name": "", "name_en": "", "price": None,
-            "images": [], "category": "other", "availability": "不明",
-            "jan_code": None, "weight_g": None, "url": "",
-            "error": f"ASIN フォーマットエラー: 「{asin}」は B から始まる10桁である必要があります",
-        }
-
-    url = f"https://www.amazon.co.jp/dp/{asin}"
-    logger.info("Amazon fetch: %s", url)
+def _fetch_single_region(
+    asin: str,
+    region: str,
+    rate_limit: bool,
+) -> Dict[str, Any]:
+    """指定リージョンの Amazon ページから商品データを取得する内部関数。"""
+    cfg = _REGION_CONFIG.get(region, _REGION_CONFIG["jp"])
+    url = f"https://www.{cfg['domain']}/dp/{asin}"
+    logger.info("Amazon fetch [%s]: %s", region, url)
 
     if rate_limit:
         _rate_limit()
 
     try:
         session = requests.Session()
-        session.headers.update(_get_headers())
+        session.headers.update(_get_headers_for_region(region))
         resp = session.get(url, timeout=15, allow_redirects=True)
 
-        # CAPTCHA チェック
         if resp.status_code == 503 or "captcha" in resp.url.lower():
-            return _error_result(asin, url, "CAPTCHA が表示されました。しばらく時間をおいて再試行してください。")
+            return _error_result(asin, url, f"[{region.upper()}] CAPTCHA が表示されました。")
 
         if resp.status_code == 404:
-            return _error_result(asin, url, f"ASIN {asin} の商品ページが見つかりません（404）")
+            return _error_result(asin, url, f"[{region.upper()}] ASIN {asin} のページが見つかりません（404）")
 
         if resp.status_code != 200:
-            return _error_result(asin, url, f"HTTP エラー: {resp.status_code}")
+            return _error_result(asin, url, f"[{region.upper()}] HTTP エラー: {resp.status_code}")
 
         soup = BeautifulSoup(resp.content, "lxml")
 
-        # CAPTCHA ページ判定
         if soup.find("form", {"action": "/errors/validateCaptcha"}):
-            return _error_result(asin, url,
-                "Amazon から CAPTCHA が要求されました。\n"
-                "ブラウザで amazon.co.jp を開いて CAPTCHA を解いてから再試行してください。")
+            return _error_result(asin, url, f"[{region.upper()}] CAPTCHA が要求されました。")
 
-        # データ抽出
         title    = _extract_title(soup)
         price    = _extract_price(soup)
         images   = _extract_images(soup)
@@ -388,14 +383,10 @@ def fetch_product_by_asin(asin: str, rate_limit: bool = True) -> Dict[str, Any]:
         jan      = _extract_jan(soup)
         weight   = _extract_weight(soup)
 
-        if not title:
-            return _error_result(asin, url,
-                "商品タイトルを取得できませんでした。ページ構造が変更されたか、アクセス制限の可能性があります。")
-
         return {
             "asin": asin,
             "name": title,
-            "name_en": "",          # Amazon JP には英語名がないことが多い
+            "name_en": title if region == "us" else "",
             "price": price,
             "images": images,
             "category": category,
@@ -403,23 +394,116 @@ def fetch_product_by_asin(asin: str, rate_limit: bool = True) -> Dict[str, Any]:
             "jan_code": jan,
             "weight_g": weight,
             "url": url,
-            "error": None,
+            "region": region,
+            "error": None if title else f"[{region.upper()}] タイトルを取得できませんでした",
         }
 
     except requests.exceptions.Timeout:
-        return _error_result(asin, url, "タイムアウト（15秒）。Amazon サーバーへの接続が遅延しています。")
+        return _error_result(asin, url, f"[{region.upper()}] タイムアウト（15秒）")
     except requests.exceptions.ConnectionError as e:
-        return _error_result(asin, url, f"接続エラー: {e}")
+        return _error_result(asin, url, f"[{region.upper()}] 接続エラー: {e}")
     except Exception as e:
-        logger.exception("Unexpected error fetching ASIN %s", asin)
-        return _error_result(asin, url, f"予期しないエラー: {e}")
+        logger.exception("Unexpected error fetching ASIN %s [%s]", asin, region)
+        return _error_result(asin, url, f"[{region.upper()}] 予期しないエラー: {e}")
+
+
+# ── メイン関数 ─────────────────────────────────────────────────────
+
+def fetch_product_by_asin(
+    asin: str,
+    rate_limit: bool = True,
+    region: str = "both",
+) -> Dict[str, Any]:
+    """
+    Amazon 商品ページから商品情報を取得する。
+
+    Args:
+        asin:       Amazon ASIN コード（例: B0BDHWDR12）
+        rate_limit: True の場合 1〜3 秒の待機を行う
+        region:     取得リージョン
+                    "jp"   → amazon.co.jp のみ（日本語・価格）
+                    "us"   → amazon.com のみ（英語画像）
+                    "both" → 両方取得（価格はJP、画像はUS優先） ← デフォルト
+
+    Returns:
+        {
+            "asin": str,
+            "name": str,             # 商品名（日本語）
+            "name_en": str,          # 商品名（英語 / US取得時）
+            "price": float|None,     # 価格（円）
+            "images": [str],         # 画像 URL リスト（最大9）
+            "images_jp": [str],      # JP 画像（region="both" 時のみ）
+            "images_us": [str],      # US 画像（region="both" 時のみ）
+            "category": str,
+            "availability": str,
+            "jan_code": str|None,
+            "weight_g": float|None,
+            "url": str,
+            "region": str,
+            "error": str|None,
+        }
+    """
+    asin = asin.strip().upper()
+
+    # ASIN 形式チェック
+    if not re.match(r"^B[A-Z0-9]{9}$", asin):
+        return {
+            "asin": asin, "name": "", "name_en": "", "price": None,
+            "images": [], "images_jp": [], "images_us": [],
+            "category": "other", "availability": "不明",
+            "jan_code": None, "weight_g": None, "url": "", "region": region,
+            "error": f"ASIN フォーマットエラー: 「{asin}」は B から始まる10桁である必要があります",
+        }
+
+    if region == "both":
+        # JP と US を並列取得
+        jp_result: Dict[str, Any] = {}
+        us_result: Dict[str, Any] = {}
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            fut_jp = executor.submit(_fetch_single_region, asin, "jp", rate_limit)
+            fut_us = executor.submit(_fetch_single_region, asin, "us", rate_limit)
+            jp_result = fut_jp.result()
+            us_result = fut_us.result()
+
+        images_jp = jp_result.get("images", [])
+        images_us = us_result.get("images", [])
+        # US 画像を優先。取得できなければ JP 画像
+        images_primary = images_us if images_us else images_jp
+
+        return {
+            "asin":         asin,
+            "name":         jp_result.get("name", ""),
+            "name_en":      us_result.get("name", ""),  # US タイトル = 英語名
+            "price":        jp_result.get("price"),
+            "images":       images_primary,
+            "images_jp":    images_jp,
+            "images_us":    images_us,
+            "category":     jp_result.get("category", "other"),
+            "availability": jp_result.get("availability", "不明"),
+            "jan_code":     jp_result.get("jan_code"),
+            "weight_g":     jp_result.get("weight_g"),
+            "url":          jp_result.get("url", ""),
+            "url_us":       us_result.get("url", ""),
+            "region":       "both",
+            # JP が失敗した場合のみエラー扱い（US は任意）
+            "error":        jp_result.get("error"),
+            "error_us":     us_result.get("error"),
+        }
+
+    else:
+        result = _fetch_single_region(asin, region, rate_limit)
+        result["images_jp"] = result.get("images", []) if region == "jp" else []
+        result["images_us"] = result.get("images", []) if region == "us" else []
+        return result
 
 
 def _error_result(asin: str, url: str, error: str) -> Dict[str, Any]:
     return {
         "asin": asin, "name": "", "name_en": "", "price": None,
-        "images": [], "category": "other", "availability": "不明",
-        "jan_code": None, "weight_g": None, "url": url,
+        "images": [], "images_jp": [], "images_us": [],
+        "category": "other", "availability": "不明",
+        "jan_code": None, "weight_g": None, "url": url, "region": "jp",
         "error": error,
     }
 

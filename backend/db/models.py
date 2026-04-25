@@ -37,6 +37,9 @@ class ProductCategory(str, PyEnum):
     SPORTS = "sports"                 # スポーツ・アウトドア
     HOME = "home"                     # 家具・インテリア
     BOOKS = "books"                   # 書籍・メディア
+    TOOLS = "tools"                   # 工具・DIY
+    HOBBY = "hobby"                   # ホビー・コレクション
+    PETS = "pets"                     # ペット用品
     AUTO = "auto"                     # 自動車・バイク
     OTHER = "other"                   # その他
 
