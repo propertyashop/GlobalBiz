@@ -23,6 +23,7 @@ import re
 import time
 import random
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, List, Dict, Any
 
 import requests
@@ -421,6 +422,42 @@ def _error_result(asin: str, url: str, error: str) -> Dict[str, Any]:
         "jan_code": None, "weight_g": None, "url": url,
         "error": error,
     }
+
+
+def fetch_products_by_asins_parallel(
+    asins: List[str],
+    max_workers: int = 5,
+    rate_limit: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    複数 ASIN を並列取得する（最大 max_workers 同時実行）。
+
+    1000 件でも max_workers=5・rate_limit=True の場合:
+      約 1000 × (平均2秒) / 5 並列 ≈ 400 秒（7分弱）で完了。
+
+    Args:
+        asins:       ASIN リスト
+        max_workers: 最大並列数（デフォルト 5）
+        rate_limit:  各リクエストで 1〜3 秒待機するか
+
+    Returns:
+        各 ASIN の fetch_product_by_asin() 結果リスト（入力順）
+    """
+    results: Dict[str, Dict[str, Any]] = {}
+
+    def _fetch(asin: str) -> tuple:
+        result = fetch_product_by_asin(asin, rate_limit=rate_limit)
+        return asin, result
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_fetch, a): a for a in asins}
+        for future in as_completed(futures):
+            asin, result = future.result()
+            results[asin] = result
+            logger.info("並列取得完了: %s (エラー: %s)", asin, result.get("error"))
+
+    # 入力順に並び替えて返す
+    return [results[a] for a in asins if a in results]
 
 
 # ── テスト実行 ──────────────────────────────────────────────────────

@@ -555,6 +555,154 @@ class EbayClient:
         pics = "".join(f"    <PictureURL>{_esc(u)}</PictureURL>\n" for u in urls[:12])
         return f"    <PictureDetails>\n{pics}    </PictureDetails>"
 
+    # ── 注文・追跡番号 ───────────────────────────────────────────────
+
+    def get_orders(
+        self,
+        days_back: int = 30,
+        page: int = 1,
+        per_page: int = 50,
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """
+        GetOrders で注文一覧を取得する。
+
+        Returns:
+            ([{order_id, buyer_name, buyer_email, shipping_*, item_id,
+               item_title, sku, quantity, sale_price, currency, paid_time}],
+             error_msg or None)
+        """
+        from datetime import timedelta
+        create_time_from = (
+            datetime.utcnow() - timedelta(days=days_back)
+        ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<GetOrdersRequest xmlns="{NS}">
+  {_creds()}
+  <CreateTimeFrom>{create_time_from}</CreateTimeFrom>
+  <CreateTimeTo>{datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")}</CreateTimeTo>
+  <OrderRole>Seller</OrderRole>
+  <OrderStatus>All</OrderStatus>
+  <Pagination>
+    <EntriesPerPage>{per_page}</EntriesPerPage>
+    <PageNumber>{page}</PageNumber>
+  </Pagination>
+  <DetailLevel>ReturnAll</DetailLevel>
+</GetOrdersRequest>"""
+
+        try:
+            root = self._call("GetOrders", xml)
+        except Exception as e:
+            return [], str(e)
+
+        if not self._ack_ok(root):
+            return [], _get_errors(root)
+
+        orders: List[Dict[str, Any]] = []
+        for order_el in root.findall(f".//{{{NS}}}Order"):
+            order_id = _find(order_el, f"{{{NS}}}OrderID") or ""
+
+            # 購入者情報
+            buyer = order_el.find(f".//{{{NS}}}Buyer")
+            buyer_id    = _find(buyer, f"{{{NS}}}UserID") if buyer is not None else ""
+            buyer_email = _find(buyer, f"{{{NS}}}Email")  if buyer is not None else ""
+
+            # 配送先
+            addr = order_el.find(f".//{{{NS}}}ShippingAddress")
+            shipping: Dict[str, str] = {}
+            if addr is not None:
+                shipping = {
+                    "name":    _find(addr, f"{{{NS}}}Name")       or "",
+                    "address": _find(addr, f"{{{NS}}}Street1")    or "",
+                    "city":    _find(addr, f"{{{NS}}}CityName")   or "",
+                    "state":   _find(addr, f"{{{NS}}}StateOrProvince") or "",
+                    "postal":  _find(addr, f"{{{NS}}}PostalCode") or "",
+                    "country": _find(addr, f"{{{NS}}}Country")    or "",
+                }
+
+            # 商品情報（最初のトランザクション）
+            trans_el = order_el.find(f".//{{{NS}}}Transaction")
+            item_id = sku = title = ""
+            qty = 1
+            price = 0.0
+            currency = "USD"
+            trans_id = ""
+            if trans_el is not None:
+                item_el  = trans_el.find(f"{{{NS}}}Item")
+                item_id  = _find(item_el, f"{{{NS}}}ItemID")    or "" if item_el is not None else ""
+                title    = _find(item_el, f"{{{NS}}}Title")     or "" if item_el is not None else ""
+                sku      = _find(item_el, f"{{{NS}}}SKU")       or "" if item_el is not None else ""
+                qty      = int(_find(trans_el, f"{{{NS}}}QuantityPurchased") or 1)
+                trans_id = _find(trans_el, f"{{{NS}}}TransactionID") or ""
+                tp_el    = trans_el.find(f".//{{{NS}}}TransactionPrice")
+                if tp_el is not None:
+                    price    = float(tp_el.text or 0)
+                    currency = tp_el.get("currencyID", "USD")
+
+            paid_time    = _find(order_el, f"{{{NS}}}PaidTime")    or ""
+            order_status = _find(order_el, f"{{{NS}}}OrderStatus") or ""
+            tracking_num = _find(order_el, f".//{{{NS}}}ShipmentTrackingNumber") or ""
+
+            orders.append({
+                "order_id":    order_id,
+                "trans_id":    trans_id,
+                "item_id":     item_id,
+                "item_title":  title,
+                "sku":         sku,
+                "quantity":    qty,
+                "sale_price":  price,
+                "currency":    currency,
+                "buyer_name":  buyer_id,
+                "buyer_email": buyer_email or "",
+                "shipping":    shipping,
+                "paid_time":   paid_time,
+                "status":      order_status,
+                "tracking":    tracking_num,
+                "platform":    "ebay",
+            })
+
+        return orders, None
+
+    def complete_sale(
+        self,
+        item_id: str,
+        trans_id: str,
+        tracking_number: str,
+        carrier: str = "FedEx",
+    ) -> UpdateResult:
+        """
+        CompleteSale: 発送済みマーク + 追跡番号をeBayに登録する。
+
+        Args:
+            item_id: eBay Item ID
+            trans_id: Transaction ID（注文ごとに異なる）
+            tracking_number: 追跡番号
+            carrier: 配送業者名（FedEx / EMS / DHL / UPS など）
+        """
+        xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<CompleteSaleRequest xmlns="{NS}">
+  {_creds()}
+  <ItemID>{_esc(item_id)}</ItemID>
+  <TransactionID>{_esc(trans_id)}</TransactionID>
+  <Paid>true</Paid>
+  <Shipped>true</Shipped>
+  <Shipment>
+    <ShipmentTrackingDetails>
+      <ShippingCarrierUsed>{_esc(carrier)}</ShippingCarrierUsed>
+      <ShipmentTrackingNumber>{_esc(tracking_number)}</ShipmentTrackingNumber>
+    </ShipmentTrackingDetails>
+  </Shipment>
+</CompleteSaleRequest>"""
+
+        try:
+            root = self._call("CompleteSale", xml)
+        except Exception as e:
+            return UpdateResult(success=False, error=str(e))
+
+        if self._ack_ok(root):
+            return UpdateResult(success=True)
+        return UpdateResult(success=False, error=_get_errors(root))
+
     def is_configured(self) -> bool:
         return bool(self.app_id and self.dev_id and self.cert_id and self.user_token)
 

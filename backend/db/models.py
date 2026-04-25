@@ -2,9 +2,9 @@ from datetime import datetime
 from enum import Enum as PyEnum
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, Enum, Float, Integer, String, Text, JSON
+    Boolean, Column, DateTime, Enum, Float, ForeignKey, Integer, String, Text, JSON
 )
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, relationship
 
 
 class Base(DeclarativeBase):
@@ -56,7 +56,7 @@ class Product(Base):
     sku = Column(String(100), unique=True, nullable=False)
 
     # ===== 仕入れ元情報 =====
-    source_site = Column(Enum(SourceSite), nullable=False, default=SourceSite.MANUAL)
+    source_site = Column(Enum(SourceSite), nullable=False, default=SourceSite.MANUAL, index=True)
     source_url = Column(Text, nullable=True)
     source_item_id = Column(String(200), nullable=True)  # 旧汎用フィールド（後方互換）
 
@@ -123,11 +123,105 @@ class Product(Base):
     hs_code = Column(String(20), nullable=True)
 
     # ===== メタ =====
-    status = Column(Enum(ProductStatus), nullable=False, default=ProductStatus.DRAFT)
+    status = Column(Enum(ProductStatus), nullable=False, default=ProductStatus.DRAFT, index=True)
     tags = Column(JSON, nullable=True)
     notes = Column(Text, nullable=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def __repr__(self) -> str:
         return f"<Product id={self.id} sku={self.sku} name={self.name[:30]}>"
+
+
+# ══════════════════════════════════════════════════════════════════
+#  注文関連 Enum
+# ══════════════════════════════════════════════════════════════════
+
+class OrderStatus(str, PyEnum):
+    PENDING   = "pending"    # 処理中（未発送）
+    ORDERED   = "ordered"    # 仕入れ発注済み
+    SHIPPED   = "shipped"    # 発送済み
+    DELIVERED = "delivered"  # 配達完了
+    CANCELLED = "cancelled"  # キャンセル
+
+
+class PurchaseStatus(str, PyEnum):
+    NOT_ORDERED = "not_ordered"  # 未発注
+    ORDERED     = "ordered"      # 発注済み
+    RECEIVED    = "received"     # 入荷済み
+
+
+class LogisticsProvider(str, PyEnum):
+    FEDEX    = "fedex"
+    ELOGICOM = "elogicom"
+    SEAPASS  = "seapass"
+    EMS      = "ems"       # 日本郵便 EMS（手動）
+    MANUAL   = "manual"    # 自己発送
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Order モデル
+# ══════════════════════════════════════════════════════════════════
+
+class Order(Base):
+    __tablename__ = "orders"
+
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    order_id   = Column(String(200), nullable=False, unique=True, index=True)  # eBay/Shopee注文ID
+    platform   = Column(String(20),  nullable=False)                           # "ebay" / "shopee"
+
+    # ── 購入者・配送先 ──
+    buyer_name      = Column(String(200), nullable=True)
+    buyer_email     = Column(String(200), nullable=True)
+    shipping_name   = Column(String(200), nullable=True)
+    shipping_address= Column(Text,        nullable=True)
+    shipping_city   = Column(String(100), nullable=True)
+    shipping_state  = Column(String(100), nullable=True)
+    shipping_postal = Column(String(20),  nullable=True)
+    shipping_country= Column(String(10),  nullable=True)  # 2文字 ISO / 3文字
+
+    # ── 商品情報（スナップショット）──
+    product_id   = Column(Integer, ForeignKey("products.id"), nullable=True)
+    product_name = Column(String(500), nullable=True)   # 注文時点の商品名
+    sku          = Column(String(100), nullable=True)
+    quantity     = Column(Integer, nullable=False, default=1)
+
+    # ── 価格 ──
+    sale_price      = Column(Float, nullable=True)   # 販売価格（現地通貨）
+    sale_currency   = Column(String(10), nullable=True)  # "USD" / "SGD" など
+    sale_price_jpy  = Column(Float, nullable=True)   # 円換算
+    purchase_price  = Column(Float, nullable=True)   # 仕入れ価格（円）
+    shipping_fee_jpy= Column(Float, nullable=True)   # 国内送料
+    profit_jpy      = Column(Float, nullable=True)   # 利益（円）
+
+    # ── 仕入れ ──
+    purchase_status = Column(
+        Enum(PurchaseStatus), nullable=False, default=PurchaseStatus.NOT_ORDERED
+    )
+    purchase_url    = Column(Text, nullable=True)    # Amazon/楽天など仕入れURL
+    purchase_note   = Column(Text, nullable=True)
+
+    # ── 物流 ──
+    logistics_provider = Column(Enum(LogisticsProvider), nullable=True)
+    tracking_number    = Column(String(200), nullable=True, index=True)
+    carrier_name       = Column(String(100), nullable=True)  # "FedEx" / "EMS" など
+    label_url          = Column(Text, nullable=True)         # 送り状 PDF URL
+
+    # ── ステータス ──
+    status       = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.PENDING)
+    ordered_at   = Column(DateTime, nullable=True)   # eBay/Shopee 注文日時
+    shipped_at   = Column(DateTime, nullable=True)
+    delivered_at = Column(DateTime, nullable=True)
+
+    # ── メタ ──
+    notes      = Column(Text,     nullable=True)
+    raw_data   = Column(JSON,     nullable=True)   # 元CSVデータ（参照用）
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow,
+                        onupdate=datetime.utcnow)
+
+    # ── リレーション ──
+    product = relationship("Product", foreign_keys=[product_id])
+
+    def __repr__(self) -> str:
+        return f"<Order id={self.id} order_id={self.order_id} status={self.status}>"

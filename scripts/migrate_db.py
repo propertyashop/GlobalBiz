@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import sqlite3
 from backend.db.database import _db_path, engine, init_db
-from backend.db.models import Base
+from backend.db.models import Base, Order
 
 DB_PATH = str(_db_path)
 
@@ -61,7 +61,7 @@ def migrate():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    # テーブルが存在しない場合は SQLAlchemy で作成
+    # テーブルが存在しない場合は SQLAlchemy で作成（orders テーブルも含む）
     init_db()
 
     existing = get_existing_columns(cursor, "products")
@@ -80,9 +80,27 @@ def migrate():
             added += 1
 
     conn.commit()
+
+    # ── インデックス追加（存在しない場合のみ）──
+    INDEXES = [
+        ("ix_products_status",      "products", "status"),
+        ("ix_products_source_site", "products", "source_site"),
+        ("ix_products_created_at",  "products", "created_at"),
+    ]
+    idx_added = 0
+    for idx_name, tbl, col in INDEXES:
+        try:
+            cursor.execute(
+                f"CREATE INDEX IF NOT EXISTS {idx_name} ON {tbl}({col})"
+            )
+            print(f"  INDEX {idx_name}")
+            idx_added += 1
+        except Exception as e:
+            print(f"  INDEX SKIP {idx_name}: {e}")
+    conn.commit()
     conn.close()
 
-    print(f"\n完了: {added} カラム追加, {skipped} カラムスキップ")
+    print(f"\n完了: {added} カラム追加, {skipped} カラムスキップ, {idx_added} インデックス")
 
     # 既存データの確認
     from backend.db.database import get_session
