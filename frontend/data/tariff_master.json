@@ -2,7 +2,6 @@
   "_meta": {
     "version": "1.0",
     "updated_at": "2026-04-26",
-    "note": "関税・輸入税マスタ。HSコード別税率は代表例のみ収録。実運用前に各国税関の最新情報で再確認すること。",
     "exchange_rate_jpy": {
       "USD": 155.0,
       "SGD": 115.0,
@@ -19,7 +18,6 @@
       "vat_rate": 0.0,
       "vat_name": "（連邦消費税なし）",
       "de_minimis_local": null,
-      "de_minimis_note": "2025年8月29日にDe Minimis廃止。全荷物が課税対象。",
       "hs_overrides": {
         "8517.13": 0.15,
         "8518.30": 0.15,
@@ -38,7 +36,6 @@
       "vat_rate": 0.09,
       "vat_name": "GST",
       "de_minimis_local": 400,
-      "de_minimis_note": "CIF SGD 400以下はGST免除（2023年1月以降は低額輸入もGST課税対象だが、海外通販OVR登録済セラー以外は400以下なら実質非課税）",
       "hs_overrides": {}
     },
     "TW": {
@@ -48,7 +45,6 @@
       "vat_rate": 0.05,
       "vat_name": "営業税",
       "de_minimis_local": 2000,
-      "de_minimis_note": "CIF NT$2,000以下は関税・営業税ともに免除（半年6回まで）",
       "hs_overrides": {
         "8517.13": 0.0,
         "8518.30": 0.05,
@@ -63,7 +59,6 @@
       "vat_rate": 0.10,
       "vat_name": "SST",
       "de_minimis_local": 500,
-      "de_minimis_note": "CIF RM500以下は関税・SST免除。低額品（RM500以下）はLVG（10%）対象になる場合あり",
       "hs_overrides": {
         "8517.13": 0.0,
         "9101.00": 0.20
@@ -76,7 +71,6 @@
       "vat_rate": 0.12,
       "vat_name": "VAT",
       "de_minimis_local": 10000,
-      "de_minimis_note": "CIF PHP 10,000以下は関税・VATともに免除",
       "hs_overrides": {
         "8517.13": 0.0,
         "9101.00": 0.15
@@ -84,16 +78,12 @@
     }
   },
   "platform_fees": {
-    "ebay": {
-      "name": "eBay",
-      "rate": 0.1325,
-      "note": "Final Value Fee 12.9% + 0.35% (国際取引調整込み概算)"
-    },
+    "ebay": { "rate": 0.1325 },
     "shopee": {
-      "SG": { "rate": 0.08, "note": "Commission 6% + Transaction 2%" },
-      "TW": { "rate": 0.085, "note": "Commission 6.5% + Transaction 2%" },
-      "MY": { "rate": 0.09, "note": "Commission 7% + Transaction 2%" },
-      "PH": { "rate": 0.09, "note": "Commission 7% + Transaction 2%" }
+      "SG": { "rate": 0.08 },
+      "TW": { "rate": 0.085 },
+      "MY": { "rate": 0.09 },
+      "PH": { "rate": 0.09 }
     }
   }
 }
