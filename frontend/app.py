@@ -60,6 +60,54 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
+# ══════════════════════════════════════════════════════════════════
+#  パスワード認証
+# ══════════════════════════════════════════════════════════════════
+
+def _check_auth() -> None:
+    """未認証ならパスワード入力画面を表示し、st.stop() でアプリ本体の描画を止める。"""
+    if st.session_state.get("authenticated"):
+        return
+
+    # ── ログイン画面 ─────────────────────────────────────────
+    col_l, col_c, col_r = st.columns([1, 1, 1])
+    with col_c:
+        st.markdown("## 🔐 GlobalBiz")
+        st.caption("越境EC運営ツール — アクセスにはパスワードが必要です")
+        st.divider()
+
+        with st.form("login_form", clear_on_submit=True):
+            pw = st.text_input(
+                "パスワード",
+                type="password",
+                placeholder="パスワードを入力してください",
+                label_visibility="collapsed",
+            )
+            login_btn = st.form_submit_button("🔑 ログイン", use_container_width=True, type="primary")
+
+        if login_btn:
+            try:
+                correct = st.secrets["auth"]["password"]
+            except Exception:
+                st.error(
+                    "⚠️ `.streamlit/secrets.toml` が設定されていません。\n\n"
+                    "`secrets.toml.example` を参考に作成してください。"
+                )
+                st.stop()
+
+            if pw == correct:
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("❌ パスワードが違います。再度お試しください。")
+
+    st.stop()
+
+
+_check_auth()
+
+
 # ─────────────────────────── 定数 ────────────────────────────
 SOURCE_LABELS = {
     SourceSite.AMAZON:  "🛒 Amazon",
@@ -539,6 +587,10 @@ with st.sidebar:
     with get_session() as s:
         n = s.query(Product).count()
     st.caption(f"登録商品: {n} 件")
+    st.divider()
+    if st.button("🚪 ログアウト", use_container_width=True):
+        st.session_state["authenticated"] = False
+        st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════
