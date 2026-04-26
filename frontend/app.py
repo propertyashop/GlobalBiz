@@ -1807,7 +1807,7 @@ elif page == "➕ 商品登録":
                         # ── 推奨価格・利益 ──────────────────────
                         if r["is_ebay"]:
                             st.markdown(f"**推奨販売価格: ${r['price_usd']:,.2f} USD**"
-                                        f"　（¥{r['price_jpy']:,.0f}）")
+                                        f" （¥{r['price_jpy']:,.0f}）")
                         else:
                             price_lines = [f"S${r['price_sgd']:,.2f} SGD"]
                             if code == "TWN":  price_lines.append(f"NT${r['price_twd']:,.0f} TWD")
@@ -1815,13 +1815,13 @@ elif page == "➕ 商品登録":
                             elif code == "PHL": price_lines.append(f"₱{r['price_php']:,.0f} PHP")
                             st.markdown(
                                 "**推奨販売価格: " + " / ".join(price_lines) + "**"
-                                + f"　（¥{r['price_jpy']:,.0f}）"
+                                + f" （¥{r['price_jpy']:,.0f}）"
                             )
 
                         _profit_color = "🟢" if r["profit_jpy"] >= 0 else "🔴"
                         st.markdown(
                             f"{_profit_color} **純利益: ¥{r['profit_jpy']:,.0f}"
-                            f"　（利益率 {r['profit_rate']*100:.0f}%）**"
+                            f" （利益率 {r['profit_rate']*100:.0f}%）**"
                         )
 
                 # ── サマリ ──────────────────────────────────────
