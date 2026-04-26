@@ -1494,15 +1494,15 @@ elif page == "➕ 商品登録":
             if _pf and _cat_from_asin != "other":
                 _cat_persisted = _cat_from_asin
             _cat_idx = _cat_all.index(_cat_persisted) if _cat_persisted in _cat_all else 0
-            category_val = st.selectbox(
+            category_val = st.radio(
                 "商品カテゴリ *",
                 _cat_all,
                 index=_cat_idx,
                 format_func=lambda v: CATEGORY_LABELS.get(ProductCategory(v), v),
                 key="reg_category_select",
                 help="カテゴリを変えると利益率・HSコードが自動更新されます",
+                horizontal=True,
             )
-            # HSコード自動補完
             _auto_hs = HS_CODE_DEFAULTS.get(category_val, "")
             # 利益率スライダー（カテゴリ変更でリアルタイム更新）
             _cat_rate = get_profit_rate(category_val)
