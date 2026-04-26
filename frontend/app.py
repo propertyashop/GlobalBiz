@@ -127,7 +127,7 @@ CATEGORY_LABELS = {
      ProductCategory.COSMETICS:   "💄 化粧品・美容",
      ProductCategory.HEALTH:      "💊 健康・医療",
      ProductCategory.CLOTHING:    "👗 衣類・アパレル",
-　　  ProductCategory.ACCESSORIES: "アクセサリー",
+    ProductCategory.ACCESSORIES: "アクセサリー",
      ProductCategory.HOME:        "🏠 ホーム・家具・インテリア",
      ProductCategory.TOYS:        "🧸 おもちゃ・ゲーム",
      ProductCategory.ELECTRONICS: "📱 家電・電子機器",
