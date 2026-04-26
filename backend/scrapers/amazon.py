@@ -359,7 +359,7 @@ def _fetch_single_region(
     try:
         session = requests.Session()
         session.headers.update(_get_headers_for_region(region))
-        SCRAPER_API_KEY = "eebc37ad0fd57ed00854806b7bea2985"
+        SCRAPER_API_KEY = "eebc37ad0fd5fe00854006b70ea2985"
         scraper_url = f"https://api.scraperapi.com/?api_key={SCRAPER_API_KEY}&url={url}"
         resp = session.get(scraper_url, timeout=60, allow_redirects=True)
 
