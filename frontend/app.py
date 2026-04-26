@@ -123,21 +123,23 @@ STATUS_LABELS = {
     ProductStatus.DRAFT:         "📝 下書き",
 }
 CATEGORY_LABELS = {
-    ProductCategory.ELECTRONICS: "📱 家電・電子機器",
-    ProductCategory.CLOTHING:    "👗 衣類・アパレル",
-    ProductCategory.ACCESSORIES: "💍 アクセサリー",
-    ProductCategory.TOYS:        "🎮 おもちゃ・ゲーム",
-    ProductCategory.FOOD:        "🍱 食品・飲料",
-    ProductCategory.COSMETICS:   "💄 化粧品・美容",
-    ProductCategory.HEALTH:      "💊 健康・医療",
-    ProductCategory.SPORTS:      "⚽ スポーツ・アウトドア",
-    ProductCategory.HOME:        "🏠 ホーム・家具・インテリア",
-    ProductCategory.BOOKS:       "📚 本・メディア",
-    ProductCategory.TOOLS:       "🔧 工具・DIY",
-    ProductCategory.HOBBY:       "🧸 ホビー・コレクション",
-    ProductCategory.PETS:        "🐾 ペット用品",
-    ProductCategory.AUTO:        "🚗 自動車・バイク用品・自転車",
-    ProductCategory.OTHER:       "📦 その他",
+    
+     ProductCategory.COSMETICS:   "💄 化粧品・美容",
+     ProductCategory.HEALTH:      "💊 健康・医療",
+     ProductCategory.CLOTHING:    "👗 衣類・アパレル",
+　　  ProductCategory.ACCESSORIES: "💍 アクセサリー",
+     ProductCategory.HOME:        "🏠 ホーム・家具・インテリア",
+     ProductCategory.TOYS:        "🧸 おもちゃ・ゲーム",
+     ProductCategory.ELECTRONICS: "📱 家電・電子機器",
+     ProductCategory.SPORTS:      "⚽ スポーツ・アウトドア",
+     ProductCategory.BOOKS:       "📚 本・メディア",
+     ProductCategory.TOOLS:       "🔧 工具・DIY・刃物",
+     ProductCategory.HOBBY:       "🎨 ホビー・コレクション",
+     ProductCategory.PETS:        "🐾 ペット用品",
+     ProductCategory.AUTO:        "🚗 自動車・バイク用品・自転車",
+     ProductCategory.FOOD:        "🍱 食品・飲料",
+     ProductCategory.OTHER:       "📦 その他",
+
 }
 
 # カテゴリ → 代表的な HS コード
