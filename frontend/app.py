@@ -1126,7 +1126,6 @@ elif page == "➕ 商品登録":
                     if (_imgs_jp_n or _imgs_us_n)
                     else f"画像 {len(pf_data.get('images',[]))} 枚"
                 )
-            st.session_state["reg_name_jp"] = _n
             if st.button("🗑 取得データをクリア", key="clear_prefill"):
                     for _k in ["asin_prefill", "reg_images"]:
                         st.session_state.pop(_k, None)
