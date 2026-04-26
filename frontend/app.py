@@ -131,12 +131,15 @@ CATEGORY_LABELS = {
     ProductCategory.COSMETICS:   "💄 化粧品・美容",
     ProductCategory.HEALTH:      "💊 健康・医療",
     ProductCategory.SPORTS:      "⚽ スポーツ・アウトドア",
-    ProductCategory.HOME:        "🏠 ホーム・インテリア",
+    ProductCategory.HOME:        "🏠 ホーム・家具・インテリア",
     ProductCategory.BOOKS:       "📚 本・メディア",
     ProductCategory.TOOLS:       "🔧 工具・DIY",
     ProductCategory.HOBBY:       "🧸 ホビー・コレクション",
     ProductCategory.PETS:        "🐾 ペット用品",
-    ProductCategory.AUTO:        "🚗 自動車・バイク用品",
+    ProductCategory.AUTO:        "🚗 自動車・バイク用品・自転車",
+    ProductCategory.WATCH:       "⌚ 時計・ジュエリー",
+    ProductCategory.DAILY_GOODS: "📦 雑貨・日用品",
+    ProductCategory.ORGANIC:     "🌿 オーガニック・健康食品",
     ProductCategory.OTHER:       "📦 その他",
 }
 
