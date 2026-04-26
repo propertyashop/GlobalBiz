@@ -359,9 +359,9 @@ def _fetch_single_region(
     try:
         session = requests.Session()
         session.headers.update(_get_headers_for_region(region))
-        SCRAPER_API_KEY = "eebc37ad0fd5fe00854006b70ea2985"
-        scraper_url = f"https://api.scraperapi.com/?api_key={SCRAPER_API_KEY}&url={url}&country_code=jp"
-        resp = session.get(scraper_url, timeout=60, allow_redirects=True)
+        resp = session.get(url, timeout=15, allow_redirects=True)
+
+
 
         if resp.status_code == 503 or "captcha" in resp.url.lower():
             return _error_result(asin, url, f"[{region.upper()}] CAPTCHA が表示されました。")
