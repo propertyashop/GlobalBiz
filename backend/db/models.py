@@ -30,6 +30,7 @@ class ProductCategory(str, PyEnum):
     ELECTRONICS = "electronics"       # 家電・電子機器
     CLOTHING = "clothing"             # 衣類・アパレル
     ACCESSORIES = "accessories"       # アクセサリー・装飾品
+    WATCH = "watch"                   # 時計・ジュエリー
     TOYS = "toys"                     # おもちゃ・ゲーム
     FOOD = "food"                     # 食品・飲料
     COSMETICS = "cosmetics"           # 化粧品・美容
@@ -40,9 +41,10 @@ class ProductCategory(str, PyEnum):
     TOOLS = "tools"                   # 工具・DIY
     HOBBY = "hobby"                   # ホビー・コレクション
     PETS = "pets"                     # ペット用品
-    AUTO = "auto"                     # 自動車・バイク
+    AUTO = "auto"                     # 自動車・バイク・自転車
+    DAILY_GOODS = "daily_goods"       # 雑貨・日用品
+    ORGANIC = "organic"               # オーガニック・健康食品
     OTHER = "other"                   # その他
-
 
 class SizeClass(str, PyEnum):
     SMALL = "small"       # 60サイズ以下
