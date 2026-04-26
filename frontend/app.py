@@ -1678,7 +1678,7 @@ elif page == "➕ 商品登録":
         with st.form("preview_form"):
             prev_cost_in = st.number_input("仕入れ値（円）", value=float(preview_cost), step=100.0)
             prev_weight_in = st.number_input("重量 (g)", value=float(preview_weight), step=10.0)
-                                prev_cat_in = st.radio(
+                prev_cat_in = st.radio(
                         "カテゴリ",
                         [c.value for c in ProductCategory],
                         format_func=lambda v: CATEGORY_LABELS.get(ProductCategory(v), v),
