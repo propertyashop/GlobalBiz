@@ -1682,8 +1682,8 @@ elif page == "➕ 商品登録":
                 "カテゴリ",
                 [c.value for c in ProductCategory],
                 format_func=lambda v: CATEGORY_LABELS.get(ProductCategory(v), v),
+                horizontal=True,
             )
-            
             prev_countries_in = st.multiselect(
                 "販売先国",
                 options=list(COUNTRY_OPTIONS.keys()),
