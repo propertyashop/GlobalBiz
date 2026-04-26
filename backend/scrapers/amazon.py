@@ -360,7 +360,7 @@ def _fetch_single_region(
         session = requests.Session()
         session.headers.update(_get_headers_for_region(region))
         SCRAPER_API_KEY = "eebc37ad0fd5fe00854006b70ea2985"
-        scraper_url = f"https://api.scraperapi.com/?api_key={SCRAPER_API_KEY}&url={url}"
+        scraper_url = f"https://api.scraperapi.com/?api_key={SCRAPER_API_KEY}&url={url}&country_code=jp"
         resp = session.get(scraper_url, timeout=60, allow_redirects=True)
 
         if resp.status_code == 503 or "captcha" in resp.url.lower():
