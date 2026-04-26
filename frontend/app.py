@@ -1041,14 +1041,14 @@ elif page == "➕ 商品登録":
             # 画像取得リージョン選択
             _img_region = _af_c2.radio(
                 "画像取得元",
-                ["🇺🇸 US（英語）", "🇯🇵 JP（日本語）", "🌐 両方"],
+                options=["🇯🇵JP（日本語）", "🇺🇸US（英語）", "🌐 両方"],
                 index=0,
                 key="asin_img_region",
                 help="US画像は英語パッケージ。JP画像は日本語パッケージ。両方取得して選べます。",
             )
             _region_map = {
-                "🇺🇸 US（英語）": "us",
-                "🇯🇵 JP（日本語）": "jp",
+                "🇯🇵JP（日本語）": "jp",
+                "🇺🇸US（英語）": "us",
                 "🌐 両方": "both",
             }
             _selected_region = _region_map.get(_img_region, "both")
@@ -1521,7 +1521,7 @@ elif page == "➕ 商品登録":
             st.subheader("📋 基本情報")
             c1, c2 = st.columns(2)
             name = c1.text_input("商品名 *", value=_pf.get("name", ""), placeholder="例: Apple AirPods Pro")
-            sku  = c2.text_input("SKU *", placeholder="例: APPLE-APP-001")
+            sku = c2.text_input("SKU（空欄で自動生成）", placeholder="例: APPLE-APP-001")
 
             c3, c4 = st.columns(2)
             source_site_val = c3.selectbox(
