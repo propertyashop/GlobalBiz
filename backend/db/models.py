@@ -27,24 +27,21 @@ class ProductStatus(str, PyEnum):
 
 
 class ProductCategory(str, PyEnum):
-    ELECTRONICS = "electronics"       # 家電・電子機器
-    CLOTHING = "clothing"             # 衣類・アパレル
-    ACCESSORIES = "accessories"       # アクセサリー・装飾品
-    WATCH = "watch"                   # 時計・ジュエリー
-    TOYS = "toys"                     # おもちゃ・ゲーム
-    FOOD = "food"                     # 食品・飲料
-    COSMETICS = "cosmetics"           # 化粧品・美容
-    HEALTH = "health"                 # 健康・医療
-    SPORTS = "sports"                 # スポーツ・アウトドア
-    HOME = "home"                     # 家具・インテリア
-    BOOKS = "books"                   # 書籍・メディア
-    TOOLS = "tools"                   # 工具・DIY
-    HOBBY = "hobby"                   # ホビー・コレクション
-    PETS = "pets"                     # ペット用品
-    AUTO = "auto"                     # 自動車・バイク・自転車
-    DAILY_GOODS = "daily_goods"       # 雑貨・日用品
-    ORGANIC = "organic"               # オーガニック・健康食品
-    OTHER = "other"                   # その他
+        COSMETICS = "cosmetics"      # 化粧品・美容
+        HEALTH = "health"            # 健康・医療
+        CLOTHING = "clothing"        # 衣類・アパレル
+        ACCESSORIES = "accessories"  # アクセサリー・装飾品
+        HOME = "home"                # ホーム・家具・インテリア
+        TOYS = "toys"                # おもちゃ・ゲーム
+        ELECTRONICS = "electronics"  # 家電・電子機器
+        SPORTS = "sports"            # スポーツ・アウトドア
+        BOOKS = "books"              # 書籍・メディア
+        TOOLS = "tools"              # 工具・DIY・刃物
+        HOBBY = "hobby"              # ホビー・コレクション
+        PETS = "pets"                # ペット用品
+        AUTO = "auto"                # 自動車・バイク・自転車
+        FOOD = "food"                # 食品・飲料
+        OTHER = "other"              # その他
 
 class SizeClass(str, PyEnum):
     SMALL = "small"       # 60サイズ以下
