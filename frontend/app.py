@@ -1076,6 +1076,7 @@ elif page == "➕ 商品登録":
                         st.error(f"❌ {_result['error']}")
                     else:
                         st.session_state["asin_prefill"] = _result
+                    st.session_state["reg_name_jp"] = _result.get("name", "") or _result.get("name_en", "")
                         _name_disp = _result.get("name", "") or _result.get("name_en", "")
                         st.success(f"✅ 取得完了: {_name_disp[:50]}")
                         if _result.get("price"):
