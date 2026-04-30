@@ -1522,7 +1522,8 @@ elif page == "➕ 商品登録":
             st.subheader("📋 基本情報")
             c1, c2 = st.columns(2)
             name = c1.text_input("商品名 *", value=_pf.get("name", ""), placeholder="例: Apple AirPods Pro")
-            sku = c2.text_input("SKU（空欄で自動生成）", placeholder="例: APPLE-APP-001")
+            _auto_sku = ("AMZ-" + _pf.get("asin", "")) if _pf.get("asin") else ""
+            sku = c2.text_input("SKU（空欄で自動生成）", value=_auto_sku, placeholder="例：APPLE-APP-001")
 
             c3, c4 = st.columns(2)
             source_site_val = c3.selectbox(
@@ -2314,9 +2315,9 @@ elif page == "⚙️ 設定":
         _tok = get_env("EBAY_USER_TOKEN")
         if _tok:
             _tlen = len(_tok)
-            if _tlen < 200:
+            if _tlen < 50:
                 st.error(f"⚠️ トークン {_tlen}文字（正常: 350〜500文字）")
-            elif _tlen < 300:
+            elif _tlen < 50:
                 st.warning(f"⚠️ トークン {_tlen}文字（やや短め）")
             else:
                 st.info(f"✅ トークン長: {_tlen}文字（正常）")
@@ -2734,7 +2735,8 @@ elif page == "✏️ 商品編集":
         with st.form("edit_basic_form"):
             ec1, ec2 = st.columns(2)
             new_name = ec1.text_input("商品名 *", value=ep.name)
-            new_sku  = ec2.text_input("SKU *", value=ep.sku)
+            _auto_sku = f"AMZ-{ep.asin}" if ep.asin else ""
+            new_sku  = ec2.text_input("SKU *", value=ep.sku or _auto_sku)
 
             ec3, ec4 = st.columns(2)
             new_source = ec3.selectbox(
