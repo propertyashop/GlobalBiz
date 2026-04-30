@@ -582,7 +582,7 @@ with st.sidebar:
     page = st.radio(
         "ナビゲーション",
         ["📦 商品一覧", "➕ 商品登録", "✏️ 商品編集", "📥 インポート",
-         "🚀 出品管理", "📊 監視・スケジューラ", "⚙️ 設定"],
+         "🚀 出品管理", "📊 監視・スケジューラ", "⚙️ 設定", "📧 メール管理"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -3629,3 +3629,12 @@ elif page == "📊 監視・スケジューラ":
                             s.commit()
                         st.success(f"✅ 仕入れ値を ¥{new_price:,.0f} に更新しました")
                         st.rerun()
+
+# ─────────────────────────────────────────────
+# PAGE: メール管理
+# ─────────────────────────────────────────────
+elif page == "📧 メール管理":
+    import sys, os
+    sys.path.insert(0, os.path.dirname(__file__))
+    from mail_page import show_mail_page
+    show_mail_page()
